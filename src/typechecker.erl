@@ -1364,6 +1364,7 @@ subst_ty(_, Ty) -> Ty.
 %% the expression together with their type and constraints.
 %-spec type_check_expr(#env, any()) -> { any(), #{ any() => any()}, #{ any() => any()} }.
 type_check_expr(Env, Expr) ->
+    io:format("type_check_expr Expr ~p~n", [Expr]),
     Res = {Ty, _VarBinds, _Cs} = do_type_check_expr(Env, Expr),
     ?verbose(Env, "~sPropagated type of ~ts :: ~ts~n",
              [format_location(Expr, brief), erl_prettypr:format(Expr), typelib:pp_type(Ty)]),
@@ -1486,9 +1487,11 @@ do_type_check_expr(Env, {call, _, {atom, _, record_info}, [_, _]} = Call) ->
     Ty = get_record_info_type(Call, Env#env.tenv),
     {Ty, #{}, constraints:empty()};
 do_type_check_expr(Env, {call, P, Name, Args}) ->
-    {FunTy, VarBinds1, Cs1} = type_check_fun(Env, Name, length(Args)),
-    {ResTy, VarBinds2, Cs2} = type_check_call_ty(Env, expect_fun_type(Env, FunTy), Args
+    X={FunTy, VarBinds1, Cs1} = type_check_fun(Env, Name, length(Args)),
+    % io:format("type_check_fun ~p~n", [X]),
+    Y={ResTy, VarBinds2, Cs2} = type_check_call_ty(Env, expect_fun_type(Env, FunTy), Args
                                                 ,{Name, P, FunTy}),
+    % io:format("type_check_fun ~p~n", [Y]),
     {ResTy, union_var_binds(VarBinds1, VarBinds2, Env#env.tenv),
             constraints:combine(Cs1, Cs2)};
 
@@ -1801,6 +1804,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
     end.
 
 type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
+    io:format("in type_check_rel_op~n"),
     case {type_check_expr(Env, Arg1), type_check_expr(Env, Arg2)} of
         {{Ty1, VB1, Cs1}, {Ty2, VB2, Cs2}} ->
             case compatible(Ty1, Ty2, Env#env.tenv) of
@@ -1817,6 +1821,7 @@ type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
                                 type(boolean)
                         end,
                     MergedVB = merge_types_on_equality(Env, Op,{Arg1,Ty1},{Arg2,Ty2}),
+                    io:format("MergedVB ~p~n", [MergedVB]),
                     {RetType
                     ,union_var_binds([VB1, VB2, MergedVB], Env#env.tenv)
                     ,constraints:combine([Cs,Cs1,Cs2])};
@@ -1831,11 +1836,18 @@ merge_types_on_equality(_Env, RelOp, {?type(var),_}, {?type(var), _})
 merge_types_on_equality(Env, RelOp, V1, V2 = {?type(var), _})
   when (RelOp == '=:=') or (RelOp == '==') ->
     merge_types_on_equality(Env, RelOp, V2, V1);
-merge_types_on_equality(Env, RelOp, {{var, _, Var}, {Ty1,_,_}}, {_, {Ty2,_,_}})
-  when (RelOp == '=:=') or (RelOp == '==') ->
+merge_types_on_equality(Env, RelOp, {{var, _, Var}, Ty1}, {Arg2, Ty2})
+  when (RelOp =:= '=:='); (RelOp =:= '==') ->
+    io:format("merge_types_on_equality~n"
+              "First:   Var ~p~n"
+              "         Ty1 ~p~n"
+              "Second:  Arg2 ~p~n"
+              "         Ty2 ~p~n",
+              [Var, Ty1, Arg2, Ty2]),
     {Ty,_} = glb(Ty1, Ty2, Env#env.tenv),
     #{Var => Ty};
 merge_types_on_equality(_Env, _Op, _X1, _X2) ->
+    io:format("in no match~n"),
     #{}.
 
 type_check_arith_op(Env, Op, P, Arg1, Arg2) ->
@@ -1880,6 +1892,7 @@ type_check_list_op(Env, Arg1, Arg2) ->
       ,constraints:combine([Cs1, Cs2, Cs3, Cs4])
       };
     {false, _} ->
+      io:format("ARE WE HERE? ~n", []),
       throw({type_error, Arg1, Ty1, type(list)});
     {_, false} ->
         throw({type_error, Arg2, Ty2, type(list)})
@@ -3443,6 +3456,7 @@ normalize_any(T) ->
 
 %% Here at least one GuardSeq should be true, so we calculate the least upper bound
 check_guards(Env, Guards, P) ->
+    io:format("In check_guard:~n   Guards were ~p~n", [Guards]),
     X = lists:map(fun(GuardSeq) ->
                           check_guards_sequence(Env, GuardSeq)
                   end, Guards),
@@ -3451,12 +3465,16 @@ check_guards(Env, Guards, P) ->
                   normalize_any(NTy)
           end,
     VarBinds = union_var_binds_help(X, Lub),
+    io:format("Env ~p~n", [Env]),
+    io:format("X ~p~n", [X]),
+    io:format("VarBinds ~p~n", [VarBinds]),
     fail_if_unreachable_clause(VarBinds, P).
 
 %% Here, all Guards must be true, hence we calculate the greatest lower bound
 check_guards_sequence(Env, GuardSeq) ->
     RefTys = union_var_binds(
       lists:map(fun(Guard) ->
+                        io:format("going into ~p~n", [Guard]),
                         when_guard_test(Env, Guard)
                 end, GuardSeq),
       Env#env.tenv),
@@ -3473,9 +3491,6 @@ when_guard_test(Env, {call, P, {atom, _, Fun}, Vars}) ->
     check_guard_call(Env, P, Fun, Vars);
 when_guard_test(Env, {call, P, {remote,_,_,{atom, _, Fun}}, Vars}) ->
     check_guard_call(Env, P, Fun, Vars);
-when_guard_test(Env, Guard) ->
-    {_Ty, VB, _Cs} = type_check_expr(Env, Guard), % Do we need to thread the Env?
-    VB.
 
 % If Gt is a bitstring constructor <<Gt_1:Size_1/TSL_1, ..., Gt_k:Size_k/TSL_k>>, where each
 % Size_i is a guard test and each TSL_i is a type specificer list, then Rep(Gt) =
@@ -3487,14 +3502,28 @@ when_guard_test(Env, Guard) ->
 % If Gt is a map creation #{A_1, ..., A_k}, where each A_i is an association Gt_i_1 => Gt_i_2, then Rep(Gt) = {map,LINE,[Rep(A_1), ..., Rep(A_k)]}. For Rep(A), see above.
 % If Gt is a map update Gt_0#{A_1, ..., A_k}, where each A_i is an association Gt_i_1 => Gt_i_2 or Gt_i_1 := Gt_i_2, then Rep(Gt) = {map,LINE,Rep(Gt_0),[Rep(A_1), ..., Rep(A_k)]}. For Rep(A), see above.
 % If Gt is nil, [], then Rep(Gt) = {nil,LINE}.
-% If Gt is an operator guard test Gt_1 Op Gt_2, where Op is a binary operator other than match operator =, then Rep(Gt) = {op,LINE,Op,Rep(Gt_1),Rep(Gt_2)}.
-% If Gt is an operator guard test Op Gt_0, where Op is a unary operator, then Rep(Gt) = {op,LINE,Op,Rep(Gt_0)}.
+
+% If Gt is an operator guard test Gt_1 Op Gt_2,
+% where Op is a binary operator other than match operator =,
+% then Rep(Gt) = {op,LINE,Op,Rep(Gt_1),Rep(Gt_2)}.
+% when_guard_test(Env, {op, P, Op, RepB1, RepB2}) ->
+%     'TODO';
+% If Gt is an operator guard test Op Gt_0,
+% where Op is a unary operator,
+% then Rep(Gt) = {op,LINE,Op,Rep(Gt_0)}.
+% when_guard_test(Env, {op, P, UnaryOp, RepB1}) ->
+%     'TODO';
+
 % If Gt is a parenthesized guard test ( Gt_0 ), then Rep(Gt) = Rep(Gt_0), that is, parenthesized guard tests cannot be distinguished from their bodies.
 % If Gt is a record creation #Name{Field_1=Gt_1, ..., Field_k=Gt_k}, where each Field_i is an atom or _, then Rep(Gt) = {record,LINE,Name,[{record_field,LINE,Rep(Field_1),Rep(Gt_1)}, ..., {record_field,LINE,Rep(Field_k),Rep(Gt_k)}]}.
 % If Gt is a record field access Gt_0#Name.Field, where Field is an atom, then Rep(Gt) = {record_field,LINE,Rep(Gt_0),Name,Rep(Field)}.
 % If Gt is a record field index #Name.Field, where Field is an atom, then Rep(Gt) = {record_index,LINE,Name,Rep(Field)}.
 % If Gt is a tuple skeleton {Gt_1, ..., Gt_k}, then Rep(Gt) = {tuple,LINE,[Rep(Gt_1), ..., Rep(Gt_k)]}.
 % If Gt is a variable pattern V, then Rep(Gt) = {var,LINE,A}, where A is an atom with a printname consisting of the same characters as V.
+when_guard_test(Env, Guard) ->
+    {Ty, VB, _Cs} = type_check_expr(Env, Guard), % Do we need to thread the Env?
+    io:format("Type extracted from type_check_expr ~p;~p~n", [Ty,VB]),
+    VB.
 
 % {function,LINE,Name,Arity,[Rep(Fc_1), ...,Rep(Fc_k)]}.
 % If Ft is a function type (T_1, ..., T_n) -> T_0, where each T_i is a type, then Rep(Ft) =
