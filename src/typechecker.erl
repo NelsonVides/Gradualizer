@@ -1801,8 +1801,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
     end.
 
 type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
-    case {type_check_expr(Env, Arg1)
-         ,type_check_expr(Env, Arg2)} of
+    case {type_check_expr(Env, Arg1), type_check_expr(Env, Arg2)} of
         {{Ty1, VB1, Cs1}, {Ty2, VB2, Cs2}} ->
             case compatible(Ty1, Ty2, Env#env.tenv) of
                 {true, Cs} ->
@@ -1817,13 +1816,27 @@ type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
                                 % are known, i.e. not any().
                                 type(boolean)
                         end,
+                    MergedVB = merge_types_on_equality(Env, Op,{Arg1,Ty1},{Arg2,Ty2}),
                     {RetType
-                    ,union_var_binds(VB1, VB2, Env#env.tenv)
+                    ,union_var_binds([VB1, VB2, MergedVB], Env#env.tenv)
                     ,constraints:combine([Cs,Cs1,Cs2])};
                 _ ->
                     throw({type_error, relop, Op, P, Ty1, Ty2})
             end
     end.
+
+merge_types_on_equality(_Env, RelOp, {?type(var),_}, {?type(var), _})
+  when (RelOp == '=:=') or (RelOp == '==') ->
+    #{};
+merge_types_on_equality(Env, RelOp, V1, V2 = {?type(var), _})
+  when (RelOp == '=:=') or (RelOp == '==') ->
+    merge_types_on_equality(Env, RelOp, V2, V1);
+merge_types_on_equality(Env, RelOp, {{var, _, Var}, {Ty1,_,_}}, {_, {Ty2,_,_}})
+  when (RelOp == '=:=') or (RelOp == '==') ->
+    {Ty,_} = glb(Ty1, Ty2, Env#env.tenv),
+    #{Var => Ty};
+merge_types_on_equality(_Env, _Op, _X1, _X2) ->
+    #{}.
 
 type_check_arith_op(Env, Op, P, Arg1, Arg2) ->
     {Ty1, VB1, Cs1} = type_check_expr(Env, Arg1),
