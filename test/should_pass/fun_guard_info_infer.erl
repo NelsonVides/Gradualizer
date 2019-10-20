@@ -1,24 +1,12 @@
--module(fun_guard_info).
+-module(fun_guard_info_infer).
 -export([
-         guard_is_atom/1,
-         remote_guard/1,
          fun_correct_arity/1,
          fun_unspecified_arity/1,
          fun_different_variables/2,
          my_sleep/1
         ]).
 
--spec guard_is_atom(atom() | list()) -> list().
-guard_is_atom(Name) when is_atom(Name) ->
-    erlang:atom_to_list(Name);
-guard_is_atom(_Name) ->
-    [].
-
--spec remote_guard(atom() | list()) -> list().
-remote_guard(Name) when erlang:is_atom(Name) ->
-    erlang:atom_to_list(Name);
-remote_guard(_Name) ->
-    [].
+-gradualizer({infer, true}).
 
 -spec fun_correct_arity(any()) -> boolean().
 fun_correct_arity(Fun) when is_function(Fun, 2) ->
@@ -36,7 +24,7 @@ fun_different_variables(A,B)
        is_integer(A), is_atom(B) ->
     ok.
 
-%% no spec => no inference
-my_sleep(N) when is_integer(N) -> timer:sleep(N);
+%% no spec
+my_sleep(N) when is_integer(N), N > 0 -> timer:sleep(N);
 my_sleep(true) -> timer:sleep(1000);
 my_sleep(false) -> ok.
