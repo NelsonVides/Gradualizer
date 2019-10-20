@@ -187,7 +187,7 @@ type_check_forms(File, Forms, Opts) ->
         {false, []} ->
             ok;
         {false, [_|_]} ->
-            typechecker:print_errors(Errors, Opts),
+            type_print_errors:print_errors(Errors, Opts),
             nok
     end.
 
