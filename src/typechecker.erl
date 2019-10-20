@@ -5,6 +5,19 @@
          type_check_forms/2
         ]).
 
+-import(typelib,
+        [type/2,
+         type/1,
+         type_var/1,
+         return/1,
+         ret/1,
+         new_type_var/0,
+         negate_bool_type/1,
+         list_view/1,
+         from_list_view/1,
+         get_record_fields/3
+        ]).
+
 %% Export all for easier testing and debugging while the project is
 %% still in an early stage
 -compile([export_all]).
@@ -31,53 +44,9 @@
                 erlang:raise(throw, setelement(size(TypeError), TypeError, ORIGTYPE), ST)
         end).
 
--export_type([typed_record_field/0]).
-
--type type() :: gradualizer_type:abstract_type().
-
-%% Pattern macros
--define(type(T), {type, _, T, []}).
--define(type(T, A), {type, _, T, A}).
-
-%% Data collected from epp parse tree
--record(parsedata, {
-          module             :: atom(),
-          export_all = false :: boolean(),
-          exports    = []    :: [{atom(), integer()}],
-          imports    = []    :: [{module(), atom(), integer()}],
-          specs      = []    :: list(),
-          types      = []    :: list(),
-          opaques    = []    :: list(),
-          records    = []    :: list(),
-          functions  = []    :: list()
-         }).
-
--type typed_record_field() :: {typed_record_field,
-                               {record_field, erl_anno:anno(), Name :: {atom, erl_anno:anno(), atom()},
-                                DefaultValue :: gradualizer_type:abstract_expr()},
-                                Type :: type()}.
-
-%% Type environment, passed around while comparing compatible subtypes
--record(tenv, {module :: module(),
-               types = #{} :: #{{Name :: atom(), arity()} => {Params :: [atom()],
-                                                              Body :: type()}},
-               records = #{} :: #{Name :: atom()          => [typed_record_field()]}
-              }).
-
-%%% The environment passed around during typechecking.
--record(env, {fenv     = #{}
-             ,imported = #{}   :: #{{atom(), arity()} => module()}
-             ,venv     = #{}
-             ,tenv             :: #tenv{}
-             ,infer    = false :: boolean()
-             ,verbose  = false :: boolean()
-             ,exhaust  = true  :: boolean()
-             %,tyvenv  = #{}
-             }).
-
 %% Two types are compatible if one is a subtype of the other, or both.
 compatible(Ty1, Ty2, TEnv) ->
-    case {subtype(Ty1, Ty2, TEnv), subtype(Ty2, Ty1, TEnv)} of
+    case {type_subtype:subtype(Ty1, Ty2, TEnv), type_subtype:subtype(Ty2, Ty1, TEnv)} of
         {{true, C1}, {true, C2}} ->
             {true, constraints:combine(C1,C2)};
         {false, T={true, _C2}} ->
@@ -88,878 +57,6 @@ compatible(Ty1, Ty2, TEnv) ->
             false
     end.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Subtyping compatibility
-%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-%% The first argument is a "compatible subtype" of the second.
-
--spec subtype(type(), type(), #tenv{}) -> {true, any()} | false.
-subtype(Ty1, Ty2, TEnv) ->
-    try compat(Ty1, Ty2, sets:new(), TEnv) of
-        {_Memoization, Constraints} ->
-            {true, Constraints}
-    catch
-        nomatch ->
-            false
-    end.
-
-%% Check if at least on of the types in a list is a subtype of a type.
-%% Used when checking intersection types.
-any_subtype([], _Ty, _TEnv) ->
-    false;
-any_subtype([Ty1|Tys], Ty, TEnv) ->
-    case subtype(Ty1, Ty, TEnv) of
-        R={true, _} ->
-            R;
-        false ->
-            any_subtype(Tys, Ty, TEnv)
-    end.
-
-
-% This function throws an exception in case of a type error
-
-%% The functions compat and compat_ty are mutually recursive.
-%% The main entry point is compat and all recursive calls should go via compat.
-%% The function compat_ty is just a convenience function to be able to
-%% pattern match on types in a nice way.
-compat(T1, T2, A, TEnv) ->
-    Ty1 = typelib:remove_pos(normalize(T1, TEnv)),
-    Ty2 = typelib:remove_pos(normalize(T2, TEnv)),
-    case sets:is_element({Ty1, Ty2}, A) of
-        true ->
-            ret(A);
-        false ->
-            compat_ty(Ty1, Ty2, sets:add_element({Ty1, Ty2}, A), TEnv)
-    end.
-
-%% any() is used as the unknown type in the gradual type system
-compat_ty({type, _, any, []}, _, A, _TEnv) ->
-    ret(A);
-compat_ty(_, {type, _, any ,[]}, A, _TEnv) ->
-    ret(A);
-%% Term is the top of the subtyping relation
-compat_ty(_, {type, _, term, []}, A, _TEnv) ->
-    ret(A);
-%% None is the bottom of the subtyping relation
-compat_ty({type, _, none, []}, _, A, _TEnv) ->
-    ret(A);
-%% Every type is subtype of itself
-compat_ty(T, T, A, _TEnv) ->
-    ret(A);
-
-%% Variables
-compat_ty({var, _, Var}, Ty, A, _TEnv) ->
-    {A, constraints:upper(Var, Ty)};
-compat_ty(Ty, {var, _, Var}, A, _TEnv) ->
-    {A, constraints:lower(Var, Ty)};
-compat_ty({ann_type, _, [{var, _, Var}, Ty1]}, Ty2, A, TEnv) ->
-    {A1, Cs} = compat(Ty1, Ty2, A, TEnv),
-    {A1, constraints:combine(Cs, constraints:upper(Var, Ty1))};
-compat_ty(Ty1, {ann_type, _, [{var, _, Var}, Ty2]}, A, TEnv) ->
-    {A1, Cs} = compat(Ty1, Ty2, A, TEnv),
-    {A1, constraints:combine(Cs, constraints:upper(Var, Ty2))};
-
-
-
-% TODO: There are several kinds of fun types.
-% Add support for them all eventually
-compat_ty({type, _, 'fun', [_, Res1]},
-          {type, _, 'fun', [{type, _, any}, Res2]},
-          A, TEnv) ->
-    compat(Res1, Res2, A, TEnv);
-compat_ty({type, _, 'fun', [{type, _, product, Args1}, Res1]},
-          {type, _, 'fun', [{type, _, product, Args2}, Res2]},
-          A, TEnv) ->
-    {Ap, Cs} = compat_tys(Args2, Args1, A, TEnv),
-    {Aps, Css} = compat(Res1, Res2, Ap, TEnv),
-    {Aps, constraints:combine(Cs, Css)};
-
-%% Unions
-compat_ty({type, _, union, Tys1}, {type, _, union, Tys2}, A, TEnv) ->
-    lists:foldl(fun (Ty1, {A1, C1}) ->
-                    {A2, C2} = any_type(Ty1, Tys2, A1, TEnv),
-                    {A2, constraints:combine(C1, C2)}
-                end, {A, constraints:empty()}, Tys1);
-compat_ty(Ty1, {type, _, union, Tys2}, A, TEnv) ->
-    any_type(Ty1, Tys2, A, TEnv);
-compat_ty({type, _, union, Tys1}, Ty2, A, TEnv) ->
-    all_type(Tys1, Ty2, A, TEnv);
-
-% Integer types
-compat_ty(Ty1, Ty2, A, _TEnv) when ?is_int_type(Ty1), ?is_int_type(Ty2) ->
-    R1 = int_type_to_range(Ty1),
-    R2 = int_type_to_range(Ty2),
-    case lower_bound_less_or_eq(R2, R1) andalso
-        upper_bound_more_or_eq(R2, R1) of
-        true -> ret(A);
-        false -> throw(nomatch)
-    end;
-
-%% Atoms
-compat_ty({atom, _, _Atom}, {type, _, atom, []}, A, _TEnv) ->
-    ret(A);
-
-%% Binary, bitstring
-%%
-%% <<_:M, _:_*N>> means
-%% a bitstring with bit size M + K*N (for any K)
-%%
-%% <<_:M1, _:_*N1>> is subtype of <<_:M2, _:_*N2>> if
-%% for all K, there is an L such that
-%% M1 + K*N1 == M2 + L*N2
-%%
-%%                 M1      M1+N1   M1+2*N1
-%% T1 .............|.......|.......|...
-%% T2 .....|...|...|...|...|...|...|...
-%%         M2      M2+L*N2
-%%
-compat_ty({type, _, binary, [{integer, _, M1}, {integer, _, N1}]},
-          {type, _, binary, [{integer, _, M2}, {integer, _, N2}]},
-          A, _TEnv)
-  when N2 > 0, M1 >= M2,
-       N1 rem N2 == 0,
-       (M1 - M2) rem N2 == 0 ->
-    ret(A);
-
-%% Records with the same name, defined in differend modules
-%% TODO: Record equivallend on tuple form
-compat_ty({type, P1, record, [{atom, _, Name}]},
-          {type, P2, record, [{atom, _, Name}]}, A, TEnv) ->
-    Fields1 = get_maybe_remote_record_fields(Name, P1, TEnv),
-    Fields2 = get_maybe_remote_record_fields(Name, P2, TEnv),
-    compat_record_fields(Fields1, Fields2, A, TEnv);
-
-compat_ty({type, _, record, _}, {type, _, tuple, any}, A, _TEnv) ->
-    ret(A);
-
-%% Lists
-compat_ty(Ty1, Ty2, A, TEnv) when ?is_list_type(Ty1), ?is_list_type(Ty2) ->
-    {Empty1, Elem1, Term1} = list_view(Ty1),
-    {Empty2, Elem2, Term2} = list_view(Ty2),
-    case {Empty1, Empty2} of
-        {E, E}   -> ok;
-        {_, any} -> ok;
-        _        -> throw(nomatch)
-    end,
-    compat_tys([Elem1, Term1], [Elem2, Term2], A, TEnv);
-
-%% Tuples
-compat_ty({type, _, tuple, any}, {type, _, tuple, _Args}, A, _TEnv) ->
-    ret(A);
-compat_ty({type, _, tuple, _Args}, {type, _, tuple, any}, A, _TEnv) ->
-    ret(A);
-compat_ty({type, _, tuple, Args1}, {type, _, tuple, Args2}, A, TEnv) ->
-    compat_tys(Args1, Args2, A, TEnv);
-%compat_ty({user_type, _, Name, Args}, Ty, A, TEnv) ->
-%    compat(unfold_user_type(Name, Args, TEnv), Ty, A, TEnv);
-
-%% Maps
-compat_ty({type, _, map, any}, {type, _, map, _Assocs}, A, _TEnv) ->
-    ret(A);
-compat_ty({type, _, map, _Assocs}, {type, _, map, any}, A, _TEnv) ->
-    ret(A);
-compat_ty({type, _, map, Assocs1}, {type, _, map, Assocs2}, A, TEnv) ->
-    lists:foldl(fun (Assoc2, {As, Cs1}) ->
-			begin
-			    {Ax, Cs2} = any_type(Assoc2, Assocs1, As, TEnv),
-			    {Ax, constraints:combine(Cs1, Cs2)}
-			end
-		end, ret(A), Assocs2);
-compat_ty({type, _, AssocTag2, [Key2, Val2]},
-          {type, _, AssocTag1, [Key1, Val1]}, A, TEnv)
-        when AssocTag2 == map_field_assoc, AssocTag1 == map_field_assoc;
-             AssocTag2 == map_field_exact, AssocTag1 == map_field_exact;
-             AssocTag2 == map_field_assoc, AssocTag1 == map_field_exact ->
-    %% For M1 <: M2, mandatory fields in M2 must be mandatory fields in M1
-    {A1, Cs1} = compat_ty(Key1, Key2, A, TEnv),
-    {A2, Cs2} = compat_ty(Val1, Val2, A1, TEnv),
-    {A2, constraints:combine(Cs1, Cs2)};
-
-compat_ty(_Ty1, _Ty2, _, _) ->
-    throw(nomatch).
-
-
-compat_tys([], [], A, _TEnv) ->
-    ret(A);
-compat_tys([Ty1|Tys1], [Ty2|Tys2], A, TEnv) ->
-    {Ap, Cs} =
-    compat(Ty1 ,Ty2, A, TEnv),
-    {Aps, Css} = compat_tys(Tys1, Tys2, Ap, TEnv),
-    {Aps, constraints:combine(Cs, Css)};
-compat_tys(_Tys1, _Tys2, _, _) ->
-    throw(nomatch).
-
-%% Two records are compatible if they have the same name (defined in different
-%% modules) and they have the same number of fields and the field types match.
-compat_record_fields([], [], A, _TEnv) ->
-    ret(A);
-compat_record_fields([{typed_record_field, _NameAndDefaultValue1, T1} | Fs1],
-                     [{typed_record_field, _NameAndDefaultValue2, T2} | Fs2],
-                     A, TEnv) ->
-    {A1, Cs1} = compat(T1, T2, A, TEnv),
-    {A2, Cs2} = compat_record_fields(Fs1, Fs2, A1, TEnv),
-    {A2, constraints:combine(Cs1, Cs2)};
-compat_record_fields(_, _, _, _) ->
-    %% Mismatching number of fields
-    throw(nomatch).
-
-%% Returns a successful matching of two types. Convenience function for when
-%% there were no type variables involved.
-ret(A) ->
-    {A, constraints:empty()}.
-
-any_type(_Ty, [], _A, _TEnv) ->
-    throw(nomatch);
-any_type(Ty, [Ty1|Tys], A, TEnv) ->
-    try
-        compat(Ty, Ty1, A, TEnv)
-    catch
-        nomatch ->
-            any_type(Ty, Tys, A, TEnv)
-    end.
-
-%% @doc All types in `Tys' must be compatible with `Ty'.
-%% Returns all the gather memoizations and constrains.
-%% Does not return (throws `nomatch') if any of the types is not compatible.
-all_type(Tys, Ty, A, TEnv) ->
-    all_type(Tys, Ty, A, [], TEnv).
-
-all_type([], _Ty, A, Css, _TEnv) ->
-    {A, constraints:combine(Css)};
-all_type([Ty1|Tys], Ty, AIn, Css, TEnv) ->
-    {AOut, Cs} = compat_ty(Ty1, Ty, AIn, TEnv),
-    all_type(Tys, Ty, AOut, [Cs|Css], TEnv).
-
-get_maybe_remote_record_fields(RecName, Anno, TEnv) ->
-    case typelib:get_module_from_annotation(Anno) of
-        {ok, Module} ->
-            %% A record type in another module, from an expanded remote type
-            case gradualizer_db:get_record_type(Module, RecName) of
-                {ok, TypedRecordFields} ->
-                    TypedRecordFields;
-                not_found ->
-                    throw({undef, record, Anno, {Module, RecName}})
-            end;
-        none ->
-            %% Local record type
-            get_record_fields(RecName, Anno, TEnv)
-    end.
-
-get_record_fields(RecName, Anno, #tenv{records = REnv}) ->
-    case REnv of
-        #{RecName := Fields} ->
-            Fields;
-        _NotFound ->
-            throw({undef, record, Anno, RecName})
-    end.
-
-%% Greatest lower bound
-%% --------------------
-%%
-%% * Computes the maximal (in the subtyping hierarchy) type that is a subtype
-%%   of two given types.
-
--spec glb(type(), type(), TEnv :: #tenv{}) -> {type(), constraints:constraints()}.
-glb(T1, T2, TEnv) ->
-    glb(T1, T2, #{}, TEnv).
-
--spec glb([type()], TEnv :: #tenv{}) -> {type(), constraints:constraints()}.
-glb(Ts, TEnv) ->
-    lists:foldl(fun (T, {TyAcc, Cs1}) ->
-			{Ty, Cs2} = glb(T, TyAcc, TEnv),
-			{Ty, constraints:combine(Cs1, Cs2)}
-		end,
-                {type(term), constraints:empty()},
-                Ts).
-
-glb(T1, T2, A, TEnv) ->
-    case maps:is_key({T1, T2}, A) of
-        %% If we hit a recursive case we approximate with none(). Conceivably
-        %% you could do some fixed point iteration here, but let's wait for an
-        %% actual use case.
-        true -> {type(none), constraints:empty()};
-        false ->
-            case gradualizer_cache:get_glb(TEnv#tenv.module, T1, T2) of
-                false ->
-                    Ty1 = typelib:remove_pos(normalize(T1, TEnv)),
-                    Ty2 = typelib:remove_pos(normalize(T2, TEnv)),
-                    {Ty, Cs} = glb_ty(Ty1, Ty2, A#{ {Ty1, Ty2} => 0 }, TEnv),
-                    NormTy = normalize(Ty, TEnv),
-                    gradualizer_cache:store_glb(TEnv#tenv.module, T1, T2, {NormTy, Cs}),
-                    {NormTy, Cs};
-                TyCs ->
-                    %% these two types have already been seen and calculated
-                    TyCs
-            end
-    end.
-
-%% If either type is any() we don't know anything
-glb_ty({type, _, any, []} = Ty1, _Ty2, _A, _TEnv) ->
-    ret(Ty1);
-glb_ty(_Ty1, {type, _, any, []} = Ty2, _A, _TEnv) ->
-    ret(Ty2);
-
-%% term() is the top of the hierarchy
-glb_ty({type, _, term, []}, Ty2, _A, _TEnv) ->
-    ret(Ty2);
-glb_ty(Ty1, {type, _, term, []}, _A, _TEnv) ->
-    ret(Ty1);
-
-%% none() is the bottom of the hierarchy
-glb_ty({type, _, none, []} = Ty1, _Ty2, _A, _TEnv) ->
-    ret(Ty1);
-glb_ty(_Ty1, {type, _, none, []} = Ty2, _A, _TEnv) ->
-    ret(Ty2);
-
-%% glb is idempotent
-glb_ty(Ty, Ty, _A, _TEnv) ->
-    ret(Ty);
-
-%% Type variables. TODO: can we get here with constrained type variables?
-glb_ty({ann_type, _, [{var, _, _}, Ty1]}, Ty2, A, TEnv) ->
-    glb(Ty1, Ty2, A, TEnv);
-glb_ty(Ty1, {ann_type, _, [{var, _, _}, Ty2]}, A, TEnv) ->
-    glb(Ty1, Ty2, A, TEnv);
-glb_ty(Var = {var, _, _}, Ty2, _A, _TEnv) ->
-    V = new_type_var(),
-    {{var, erl_anno:new(0), V}
-    ,constraints:add_var(V,
-       constraints:combine(
-	 constraints:upper(V, Var),
-	 constraints:upper(V, Ty2)
-	))};
-glb_ty(Ty1, Var = {var, _, _}, _A, _TEnv) ->
-    V = new_type_var(),
-    {{var, erl_anno:new(0), V}
-    ,constraints:add_var(V,
-       constraints:combine(
-	 constraints:upper(V, Var),
-	 constraints:upper(V, Ty1)
-	))};
-
-%% Union types: glb distributes over unions
-glb_ty({type, Ann, union, Ty1s}, Ty2, A, TEnv) ->
-    {Tys, Css} = lists:unzip([ glb_ty(Ty1, Ty2, A, TEnv) || Ty1 <- Ty1s ]),
-    {{type, Ann, union, Tys}, constraints:combine(Css)};
-glb_ty(Ty1, {type, Ann, union, Ty2s}, A, TEnv) ->
-    {Tys, Css} = lists:unzip([glb_ty(Ty1, Ty2, A, TEnv) || Ty2 <- Ty2s ]),
-    {{type, Ann, union, Tys}, constraints:combine(Css)};
-
-%% Atom types
-glb_ty(Ty1 = {atom, _, _}, {type, _, atom, []}, _A, _TEnv) ->
-    ret(Ty1);
-glb_ty({type, _, atom, []}, Ty2 = {atom, _, _}, _A, _TEnv) ->
-    ret(Ty2);
-
-%% Number types
-glb_ty(Ty1, Ty2, _A, _TEnv) when ?is_int_type(Ty1), ?is_int_type(Ty2) ->
-    {Lo1, Hi1} = int_type_to_range(Ty1),
-    {Lo2, Hi2} = int_type_to_range(Ty2),
-    ret(type(union, int_range_to_types({int_max(Lo1, Lo2), int_min(Hi1, Hi2)})));
-
-%% List types
-glb_ty(Ty1, Ty2, A, TEnv) when ?is_list_type(Ty1), ?is_list_type(Ty2) ->
-    {Empty1, Elem1, Term1} = list_view(Ty1),
-    {Empty2, Elem2, Term2} = list_view(Ty2),
-    Empty =
-        case {Empty1, Empty2} of
-            {E, E}            -> E;
-            {any, E}          -> E;
-            {E, any}          -> E;
-            {empty, nonempty} -> none;
-            {nonempty, empty} -> none
-        end,
-    {Elem, Cs1} = glb(Elem1, Elem2, A, TEnv),
-    {Term, Cs2} = glb(Term1, Term2, A, TEnv),
-    {from_list_view({Empty, Elem, Term}), constraints:combine(Cs1, Cs2)};
-
-%% Tuple types
-glb_ty(Ty1 = {type, _, tuple, Tys1}, Ty2 = {type, _, tuple, Tys2}, A, TEnv) ->
-    case {Tys1, Tys2} of
-        {any, _} -> ret(Ty2);
-        {_, any} -> ret(Ty1);
-        _ when length(Tys1) /= length(Tys2) -> ret(type(none));
-        _ ->
-	    {Tys, Css} =
-		lists:unzip(lists:zipwith(fun(T1, T2) ->
-						  glb(T1, T2, A, TEnv)
-					  end,
-					  Tys1, Tys2)),
-            TupleType =
-                case lists:any(fun(?type(none)) -> true; (_) -> false end,
-                               Tys) of
-                    true ->
-                        type(none);
-                    false ->
-                        type(tuple, Tys)
-                end,
-	    {TupleType, constraints:combine(Css)}
-    end;
-
-%% Record types. Either exactly the same record (handled above) or tuple().
-glb_ty(Ty1 = {type, _, record, _}, {type, _, tuple, any}, _A, _TEnv) ->
-    ret(Ty1);
-glb_ty({type, _, tuple, any}, Ty2 = {type, _, record, _}, _A, _TEnv) ->
-    ret(Ty2);
-glb_ty({type, _, record, _}, {type, _, record, _}, _A, _TEnv) ->
-    ret(type(none));
-
-%% Map types. These are a bit tricky and we can't reach this case in the
-%% current code. For now going with a very crude approximation.
-glb_ty(Ty1 = {type, _, map, Assocs1}, Ty2 = {type, _, map, Assocs2}, _A, _TEnv) ->
-    case {Assocs1, Assocs2} of
-        {any, _} -> ret(Ty2);
-        {_, any} -> ret(Ty1);
-        _        -> ret(type(none))
-    end;
-
-%% Binary types. For now approximate this by returning the smallest type if
-%% they are comparable, otherwise none(). See the corresponding case in
-%% compat_ty for the subtyping rule.
-glb_ty(Ty1 = {type, _, binary, _},
-       Ty2 = {type, _, binary, _}, _A, TEnv) ->
-    case subtype(Ty1, Ty2, TEnv) of
-        {true, _} -> ret(Ty1);    %% Will never produce constraints
-        false ->
-            case subtype(Ty2, Ty1, TEnv) of
-                {true, _} -> ret(Ty2);
-                false     -> ret(type(none))
-            end
-    end;
-
-%% Function types. Would require lub on arguments for proper implementation.
-%% For now pick biggest arguments when comparable and none() otherwise.
-glb_ty({type, _, 'fun', [{type, _, product, Args1}, Res1]},
-       {type, _, 'fun', [{type, _, product, Args2}, Res2]}, A, TEnv) ->
-    NoConstraints = constraints:empty(),
-    {Res, Cs} = glb(Res1, Res2, A, TEnv),
-    Subtype =
-        fun(Ts1, Ts2) ->
-            try compat_tys(Ts1, Ts2, sets:new(), TEnv) of
-                {_, NoConstraints} -> true;
-                _ -> false
-            catch throw:nomatch -> false end
-        end,
-    case Subtype(Args1, Args2) of
-        true  -> {type('fun', [type(product, Args2), Res]), Cs};
-        false ->
-            case Subtype(Args2, Args1) of
-                true  -> {type('fun', [type(product, Args1), Res]), Cs};
-                false -> {type(none), Cs}
-            end
-    end;
-glb_ty({type, _, 'fun', [{type, _, any} = Any, Res1]},
-       {type, _, 'fun', [{type, _, any}, Res2]}, A, TEnv) ->
-    {Res, Cs} = glb(Res1, Res2, A, TEnv),
-    {type('fun', [Any, Res]), Cs};
-
-glb_ty({type, _, 'fun', [{type, _, any}, Res1]},
-       {type, _, 'fun', [{type, _, product, _} = TArgs2, _]} = T2, A, TEnv) ->
-    glb_ty(type('fun', [TArgs2, Res1]), T2, A, TEnv);
-glb_ty({type, _, 'fun', [{type, _, product, _} = TArgs1, _]} = T1,
-       {type, _, 'fun', [{type, _, any}, Res2]}, A, TEnv) ->
-    glb_ty(T1, type('fun', [TArgs1, Res2]), A, TEnv);
-
-%% normalize and remove_pos only does the top layer
-glb_ty({type, _, Name, Args1}, {type, _, Name, Args2}, A, TEnv)
-        when length(Args1) == length(Args2) ->
-    {Args, Css} = lists:unzip([ glb(Arg1, Arg2, A, TEnv) || {Arg1, Arg2} <- lists:zip(Args1, Args2) ]),
-    {type(Name, Args), constraints:combine(Css)};
-
-%% Incompatible
-glb_ty(_Ty1, _Ty2, _A, _TEnv) -> {type(none), constraints:empty()}.
-
-%% Normalize
-%% ---------
-%%
-%% * Expand user-defined and remote types on head level (except opaque types)
-%% * Replace built-in type synonyms
-%% * Flatten unions and merge overlapping types (e.g. ranges) in unions
-
--spec normalize(type(), TEnv :: #tenv{}) -> type().
-normalize({type, _, union, Tys}, TEnv) ->
-    Types = flatten_unions(Tys, TEnv),
-    case merge_union_types(Types, TEnv) of
-        []  -> type(none);
-        [T] -> T;
-        Ts  -> type(union, Ts)
-    end;
-normalize({user_type, P, Name, Args} = Type, TEnv) ->
-    case typelib:get_module_from_annotation(P) of
-        {ok, Module} ->
-            %% Local type in another module, from an expanded remote type
-            case gradualizer_db:get_type(Module, Name, Args) of
-                {ok, T} ->
-                    normalize(T, TEnv);
-                opaque ->
-                    Type;
-                not_found ->
-                    throw({undef, user_type, P, {Module, Name, length(Args)}})
-            end;
-        none ->
-            %% Local user-defined type
-            TypeId = {Name, length(Args)},
-            case TEnv#tenv.types of
-                #{TypeId := {Vars, Type0}} ->
-                    VarMap = maps:from_list(lists:zip(Vars, Args)),
-                    Type1 = typelib:substitute_type_vars(Type0, VarMap),
-                    normalize(Type1, TEnv);
-                _NotFound ->
-                    throw({undef, user_type, P, {Name, length(Args)}})
-            end
-    end;
-normalize({remote_type, P, [{atom, _, M} = Module, {atom, _, N} = Name, Args]}, TEnv) ->
-    case gradualizer_db:get_exported_type(M, N, Args) of
-        {ok, T} ->
-            normalize(T, TEnv);
-        opaque ->
-            typelib:annotate_user_types(M, {user_type, P, N, Args});
-        not_exported ->
-            throw({not_exported, remote_type, {Module, Name, length(Args)}});
-        not_found ->
-            throw({undef, remote_type, {Module, Name, length(Args)}})
-    end;
-normalize({op, _, _, _Arg} = Op, _TEnv) ->
-    erl_eval:partial_eval(Op);
-normalize({op, _, _, _Arg1, _Arg2} = Op, _TEnv) ->
-    erl_eval:partial_eval(Op);
-normalize({type, Ann, range, [T1, T2]}, TEnv) ->
-    {type, Ann, range, [normalize(T1, TEnv), normalize(T2, TEnv)]};
-normalize(Type, _TEnv) ->
-    expand_builtin_aliases(Type).
-
-%% Replace built-in type aliases
--spec expand_builtin_aliases(type()) -> type().
-expand_builtin_aliases({var, Ann, '_'}) ->
-    {type, Ann, any, []};
-expand_builtin_aliases({type, Ann, binary, []}) ->
-    {type, Ann, binary, [{integer, Ann, 0}, {integer, Ann, 8}]};
-expand_builtin_aliases({type, Ann, bitstring, []}) ->
-    {type, Ann, binary, [{integer, Ann, 0}, {integer, Ann, 1}]};
-expand_builtin_aliases({type, Ann, boolean, []}) ->
-    {type, Ann, union, [{atom, Ann, true}, {atom, Ann, false}]};
-expand_builtin_aliases({type, Ann, bool, []}) ->
-    {type, Ann, union, [{atom, Ann, true}, {atom, Ann, false}]};
-expand_builtin_aliases({type, Ann, byte, []}) ->
-    {type, Ann, range, [{integer, Ann, 0}, {integer, Ann, 255}]};
-expand_builtin_aliases({type, Ann, char, []}) ->
-    {type, Ann, range, [{integer, Ann, 0}, {integer, Ann, 16#10ffff}]};
-expand_builtin_aliases({type, Ann, number, []}) ->
-    {type, Ann, union, [{type, Ann, integer, []}, {type, Ann, float, []}]};
-expand_builtin_aliases({type, Ann, list, []}) ->
-    {type, Ann, list, [{type, Ann, any, []}]};
-expand_builtin_aliases({type, Ann, maybe_improper_list, []}) ->
-    {type, Ann, maybe_improper_list, [{type, Ann, any, []},
-                                      {type, Ann, any, []}]};
-expand_builtin_aliases({type, Ann, nonempty_list, []}) ->
-    {type, Ann, nonempty_list, [{type, Ann, any, []}]};
-expand_builtin_aliases({type, Ann, string, []}) ->
-    {type, Ann, list, [{type, Ann, char, []}]};
-expand_builtin_aliases({type, Ann, nonempty_string, []}) ->
-    {type, Ann, nonempty_list, [{type, Ann, char, []}]};
-expand_builtin_aliases({type, Ann, iodata, []}) ->
-    {type, Ann, union, [{type, Ann, iolist, []}, {type, Ann, binary, []}]};
-expand_builtin_aliases({type, Ann, iolist, []}) ->
-    %% recursive type
-    Union = [{type, Ann, byte, []},
-             {type, Ann, binary, []},
-             {type, Ann, iolist, []}],
-    Tail = [{type, Ann, nil, []},
-            {type, Ann, binary, []}],
-    {type, Ann, maybe_improper_list, [{type, Ann, union, Union},
-                                      {type, Ann, union, Tail}]};
-expand_builtin_aliases({type, Ann, function, []}) ->
-    {type, Ann, 'fun', [{type, Ann, any}, {type, Ann , any,[]}]};
-expand_builtin_aliases({type, Ann, 'fun', []}) ->
-    %% `fun()' is not a built-in alias per the erlang docs
-    %% but it is equivalent with `fun((...) -> any())'
-    {type, Ann, 'fun', [{type, Ann, any}, {type, Ann, any, []}]};
-expand_builtin_aliases({type, Ann, module, []}) ->
-    {type, Ann, atom, []};
-expand_builtin_aliases({type, Ann, mfa, []}) ->
-    {type, Ann, tuple, [{type, Ann, module, []},
-                        {type, Ann, atom, []},
-                        {type, Ann, arity, []}]};
-expand_builtin_aliases({type, Ann, arity, []}) ->
-    {type, Ann, range, [{integer, Ann, 0}, {integer, Ann, 255}]};
-expand_builtin_aliases({type, Ann, identifier, []}) ->
-    {type, Ann, union, [{type, Ann, pid, []},
-                        {type, Ann, port, []},
-                        {type, Ann, reference, []}]};
-expand_builtin_aliases({type, Ann, node, []}) ->
-    {type, Ann, atom, []};
-expand_builtin_aliases({type, Ann, timeout, []}) ->
-    {type, Ann, union, [{atom, Ann, infinity},
-                        {type, Ann, non_neg_integer, []}]};
-expand_builtin_aliases({type, Ann, no_return, []}) ->
-    {type, Ann, none, []};
-expand_builtin_aliases(Type) ->
-    Type.
-
-%% Flattens nested unions
-%%
-%% Mutually recursive with normalize/2
-%%
-%% * Normalize each element
-%% * TODO: Detect user-defined and remote types expanding to themselves
-%%   or to unions containing themselves (using memoization?)
-%% * Remove subtypes of other types in the same union; keeping any() separate
-%% * Merge integer types, including singleton integers and ranges
-%%   1, 1..5, integer(), non_neg_integer(), pos_integer(), neg_integer()
--spec flatten_unions([type()], #tenv{}) -> [type()].
-flatten_unions(Tys, TEnv) ->
-    [ FTy || Ty <- Tys, FTy <- flatten_type(normalize(Ty, TEnv), TEnv) ].
-
-flatten_type({type, _, none, []}, _) ->
-    [];
-flatten_type({type, _, union, Tys}, TEnv) ->
-    flatten_unions(Tys, TEnv);
-flatten_type({ann_type, _, [_, Ty]}, TEnv) ->
-    flatten_type(normalize(Ty, TEnv), TEnv);
-flatten_type(Ty, _TEnv) ->
-    [Ty].
-
-%% Merges overlapping integer types (including ranges and singletons).
-%% (TODO) Removes all types that are subtypes of other types in the same union.
-%% Retuns a list of disjoint types.
-merge_union_types(Types, _TEnv) ->
-    case lists:any(fun ({type, _, term, []}) -> true; (_) -> false end,
-                   Types) of
-        true ->
-            %% term() is among the types.
-            [type(term)];
-        false ->
-            {IntegerTypes1, OtherTypes1} =
-                lists:partition(fun is_int_type/1, Types),
-            IntegerTypes2 = merge_int_types(IntegerTypes1),
-            OtherTypes2 = merge_atom_types(OtherTypes1),
-            OtherTypes3 = lists:usort(OtherTypes2),
-            IntegerTypes2 ++ OtherTypes3
-    end.
-
-%% Remove all atom listerals if atom() is among the types.
-merge_atom_types(Types) ->
-    IsAnyAtom = lists:any(fun ({type, _, atom, []}) -> true;
-                              (_)                   -> false
-                          end,
-                          Types),
-    if
-        IsAnyAtom -> lists:filter(fun ({atom, _, _}) -> false;
-                                      (_)            -> true
-                                  end,
-                                  Types);
-        true      -> Types
-    end.
-
--spec is_int_type(type()) -> boolean().
-is_int_type({type, _, T, _})
-  when T == pos_integer; T == non_neg_integer; T == neg_integer;
-       T == integer; T == range -> true;
-is_int_type({integer, _, _}) -> true;
-is_int_type({char, _, _}) -> true;
-is_int_type(_) -> false.
-
-%% A type used while normalizing integer types. The ranges that are possible to
-%% write in the type system, i.e. non_neg_integer(), pos_integer(),
-%% neg_integer(), integer(), finite ranges, singletons and unions of these.
--type int_range() :: {neg_inf, -1 | non_neg_integer() | pos_inf} |
-                     {neg_integer() | 0 | 1, pos_inf} |
-                     {integer(), integer()}.
-
-%% Merges integer types by sorting on the lower bound and then merging adjacent
-%% ranges. Returns a list of mutually exclusive integer types.
-%%
-%% This is an adoption of the standard algorithm for merging intervals.
--spec merge_int_types([type()]) -> [type()].
-merge_int_types([]) ->
-    [];
-merge_int_types(IntTypes) ->
-    Ranges = lists:map(fun int_type_to_range/1, IntTypes),
-    [T | Ts] = lists:sort(fun lower_bound_less_or_eq/2, Ranges),
-    MergedRanges = merge_int_ranges_help(Ts, [T]),
-    lists:append(lists:map(fun int_range_to_types/1, MergedRanges)).
-
-merge_int_ranges_help([{R1, R2} = R | Rs], [{S1, S2} | StackTail] = Stack) ->
-    NewStack = if
-                   R1 == neg_inf; S2 == pos_inf; R1 =< S2 + 1 ->
-                       %% Overlapping or adjacent ranges. Merge them.
-                       [{S1, int_max(R2, S2)} | StackTail];
-                   true ->
-                       %% Not mergeable ranges. Push R to stack.
-                       [R | Stack]
-               end,
-    merge_int_ranges_help(Rs, NewStack);
-merge_int_ranges_help([], Stack) ->
-    lists:reverse(Stack).
-
-%% callback for sorting ranges.
--spec lower_bound_less_or_eq(int_range(), int_range()) -> boolean().
-lower_bound_less_or_eq({A, _}, {B, _}) ->
-    if
-        A == neg_inf -> true;
-        B == neg_inf -> false;
-        true         -> A =< B
-    end.
-
--spec upper_bound_more_or_eq(int_range(), int_range()) -> boolean().
-upper_bound_more_or_eq({_, A}, {_, B}) ->
-    if
-        A == pos_inf -> true;
-        B == pos_inf -> false;
-        true         -> A >= B
-    end.
-
-int_min(A, B) when A == neg_inf; B == neg_inf   -> neg_inf;
-int_min(pos_inf, B) -> B;
-int_min(A, pos_inf) -> A;
-int_min(A, B) when is_integer(A), is_integer(B) -> min(A, B).
-
-int_max(A, B) when A == pos_inf; B == pos_inf   -> pos_inf;
-int_max(neg_inf, B) -> B;
-int_max(A, neg_inf) -> A;
-int_max(A, B) when is_integer(A), is_integer(B) -> max(A, B).
-
-int_negate(pos_inf) ->
-    neg_inf;
-int_negate(neg_inf) ->
-    pos_inf;
-int_negate(I) when is_integer(I) ->
-    -I.
-
-%% Integer type to range, where the bounds can be infinities in some cases.
--spec int_type_to_range(type()) -> int_range().
-int_type_to_range({type, _, integer, []})              -> {neg_inf, pos_inf};
-int_type_to_range({type, _, neg_integer, []})          -> {neg_inf, -1};
-int_type_to_range({type, _, non_neg_integer, []})      -> {0, pos_inf};
-int_type_to_range({type, _, pos_integer, []})          -> {1, pos_inf};
-int_type_to_range({type, _, range, [{Tag1, _, I1}, {Tag2, _, I2}]})
-  when Tag1 =:= integer orelse Tag1 =:= char,
-       Tag2 =:= integer orelse Tag2 =:= char           -> {I1, I2};
-int_type_to_range({char, _, I})                        -> {I, I};
-int_type_to_range({integer, _, I})                     -> {I, I}.
-
-%% Converts a range back to a type. Creates two types in some cases and zero
-%% types if lower bound is greater than upper bound.
--spec int_range_to_types(int_range()) -> [type()].
-int_range_to_types({neg_inf, pos_inf}) ->
-    [type(integer)];
-int_range_to_types({neg_inf, -1}) ->
-    [type(neg_integer)];
-int_range_to_types({neg_inf, 0}) ->
-    [type(neg_integer), {integer, erl_anno:new(0), 0}];
-int_range_to_types({neg_inf, I}) when I > 0 ->
-    [type(neg_integer),
-     {type, erl_anno:new(0), range, [{integer, erl_anno:new(0), 0}
-                                    ,{integer, erl_anno:new(0), I}]}];
-int_range_to_types({neg_inf, I}) when I < -1 ->
-    [{type, erl_anno:new(0), range, [{integer, erl_anno:new(0), neg_inf}
-                                    ,{integer, erl_anno:new(0), I}]}];
-int_range_to_types({I, pos_inf}) when I < -1 ->
-    [{type, erl_anno:new(0), range, [{integer, erl_anno:new(0), I}
-                                    ,{integer, erl_anno:new(0), -1}]},
-     type(non_neg_integer)];
-int_range_to_types({-1, pos_inf}) ->
-    [{integer, erl_anno:new(0), -1}, type(non_neg_integer)];
-int_range_to_types({0, pos_inf}) ->
-    [type(non_neg_integer)];
-int_range_to_types({1, pos_inf}) ->
-    [type(pos_integer)];
-int_range_to_types({I, pos_inf}) when I > 1 ->
-    [{type, erl_anno:new(0), range, [{integer, erl_anno:new(0), I}
-                                    ,{integer, erl_anno:new(0), pos_inf}]}];
-int_range_to_types({I, I}) ->
-    [{integer, erl_anno:new(0), I}];
-int_range_to_types({I, J}) when is_integer(I) andalso
-				is_integer(J) andalso
-				I < J ->
-    [{type, erl_anno:new(0), range, [{integer, erl_anno:new(0), I}
-                                    ,{integer, erl_anno:new(0), J}]}];
-int_range_to_types({I, J}) when I > J ->
-    [].
-
-%% Input arg must be already normalized
-negate_num_type({type, _, TyName, []} = Ty) when
-      TyName =:= any;
-      TyName =:= integer;
-      TyName =:= float ->
-    Ty;
-negate_num_type({integer, P, I}) ->
-    {integer, P, -I};
-negate_num_type({type, P, union, Tys}) ->
-    %% We normalize the result only to merge `0 | pos_integer()` =>
-    %% `non_neg_integer()` and to have a nice increasing order of Tys.
-    %% The incoming union type must be already normalized so it shouldn't
-    %% contain any unresolved types. So it is ok to normalize the result with an
-    %% empty TEnv.
-    normalize({type, P, union, [negate_num_type(Ty)||Ty <- Tys]}, #tenv{});
-negate_num_type(None = {type, _, none, []}) ->
-    None;
-negate_num_type(RangeTy) ->
-    %% some kind of range type like `1..3' or `neg_integer()'
-    {L, U} = int_type_to_range(RangeTy),
-    L2 = int_negate(U),
-    U2 = int_negate(L),
-    case int_range_to_types({L2, U2}) of
-        [Ty] ->
-            Ty;
-        Tys = [_, _] ->
-            %% In some cases the result is two mutually exclusive type.
-            %% (Currently only when `non_neg_integer()` => `neg_integer() | 0`)
-            type(union, Tys)
-    end.
-
-negate_bool_type({atom, P, true}) ->
-    {atom, P, false};
-negate_bool_type({atom, P, false}) ->
-    {atom, P, true};
-negate_bool_type(Ty) ->
-    Ty.
-
--type list_view() :: {empty | nonempty | any | none, type(), type()}.
-
--spec list_view(type()) -> false | list_view().
-list_view(Ty = {type, _, T, Args}) when ?is_list_type(Ty) ->
-    Empty =
-        case T of
-            nil                          -> empty;
-            list                         -> any;
-            nonempty_list                -> nonempty;
-            maybe_improper_list          -> any;
-            nonempty_improper_list       -> nonempty;
-            nonempty_maybe_improper_list -> nonempty
-        end,
-    Elem =
-        case Args of
-            []      -> type(any);
-            [A | _] -> A
-        end,
-    Term =
-        case Args of
-            _ when T == nil; T == list; T == nonempty_list ->
-                type(nil);
-            [_, B] -> B;
-            _ -> type(any)  %% Don't think we get here
-        end,
-    {Empty, Elem, Term};
-list_view(_) -> false.
-
--spec from_list_view(list_view()) -> type().
-from_list_view({_, _, {type, _, none, []}}) -> type(none);
-from_list_view({empty, _, _}) -> type(nil);
-from_list_view({none, _, _}) -> type(none);
-from_list_view({Empty, Elem, {type, _, nil, []}}) ->
-    case Empty of
-        any      -> type(list, [Elem]);
-        nonempty -> type(nonempty_list, [Elem])
-    end;
-from_list_view({Empty, Elem, Term}) ->
-    case Empty of
-        any      -> type(maybe_improper_list, [Elem, Term]);
-        nonempty -> type(nonempty_improper_list, [Elem, Term])
-    end.
-
-%% End of subtype help functions
 
 %% Pattern matching on types
 %%
@@ -1012,7 +109,7 @@ expect_list_type(Ty, _, _) ->
 
 
 expect_list_union([Ty|Tys], AccTy, AccCs, Any, N, TEnv) ->
-    case expect_list_type(normalize(Ty, TEnv), N, TEnv) of
+    case expect_list_type(least_upper_bound:normalize(Ty, TEnv), N, TEnv) of
         {type_error, _} ->
             expect_list_union(Tys, AccTy, AccCs, Any, N, TEnv);
         any ->
@@ -1041,21 +138,6 @@ expect_list_union([], AccTy, AccCs, any, _N, _TEnv) ->
     {[type(any) | AccTy], AccCs};
 expect_list_union([], AccTy, AccCs, _NoAny, _N, _TEnv) ->
     {AccTy, AccCs}.
-
-infer_literal_string("") ->
-    type(nil);
-infer_literal_string(Str) ->
-    SortedChars = lists:usort(Str),
-    if length(SortedChars) =< 10 ->
-            %% heuristics: if there are not more than 10 different characters
-            %% list them explicitely as singleton types
-            CharTypes = [{char, erl_anno:new(0), C} || C <- SortedChars],
-            type(nonempty_list, [normalize(type(union, CharTypes), #tenv{})]);
-       true ->
-            type(nonempty_list,
-                 [type(range, [{char, erl_anno:new(0), hd(SortedChars)},
-                               {char, erl_anno:new(0), lists:last(SortedChars)}])])
-    end.
 
 expect_tuple_type({type, _, tuple, any}, _N) ->
     any;
@@ -1124,7 +206,7 @@ allow_empty_list({type, P, nonempty_list, []}) ->
 allow_empty_list({type, P, nonempty_list, [T]}) ->
     {type, P, list, [T]};
 allow_empty_list(Ty) ->
-    case list_view(Ty) of
+    case typelib:list_view(Ty) of
         {_Empty, _Elem, Term} ->
             type(union, [Ty, Term]);
         false -> Ty
@@ -1142,7 +224,7 @@ allow_empty_list(Ty) ->
 %% types are returned with the original non-normalized type.
 -spec expect_fun_type(#env{}, type()) -> fun_ty() | {type_error, type()}.
 expect_fun_type(Env, Type) ->
-    case expect_fun_type1(Env, normalize(Type, Env#env.tenv)) of
+    case expect_fun_type1(Env, least_upper_bound:normalize(Type, Env#env.tenv)) of
         type_error -> {type_error, Type};
         Other -> Other
     end.
@@ -1260,10 +342,6 @@ expect_record_union(Record, [Ty | Tys], TEnv) ->
 expect_record_union(_Record, [], _TEnv) ->
     type_error.
 
-new_type_var() ->
-    I = erlang:unique_integer(),
-    "_TyVar" ++ integer_to_list(I).
-
 bounded_type_list_to_type(TEnv, Types) ->
     case unfold_bounded_type_list(TEnv, Types) of
         [Ty] -> Ty;
@@ -1312,7 +390,7 @@ solve_bounds(TEnv, Defs, [{acyclic, X} | SCCs], Acc) ->
 	      %% Take intersection after substitution to
 	      %% get rid of type variables.
 	      lists:foldl(fun(S, {T, Css}) ->
-				  {Ty, Cs} = glb(S, T, TEnv),
+				  {Ty, Cs} = greatest_lower_bound:glb(S, T, TEnv),
 				  {Ty, constraints:combine(Cs, Css)}
 			  end,
 			  {type(term), constraints:empty()}, Tys1);
@@ -1378,7 +456,7 @@ do_type_check_expr(Env, {var, P, Var}) ->
     end;
 do_type_check_expr(Env, {match, _, Pat, Expr}) ->
     {Ty, VarBinds, Cs} = type_check_expr(Env, Expr),
-    NormTy = normalize(Ty, Env#env.tenv),
+    NormTy = least_upper_bound:normalize(Ty, Env#env.tenv),
     {_PatTy, UBoundNorm, Env2, Cs2} =
             ?throw_orig_type(add_type_pat(Pat, NormTy, Env#env.tenv, VarBinds),
                              Ty, NormTy),
@@ -1437,7 +515,7 @@ do_type_check_expr(Env, {cons, _, Head, Tail}) ->
                         %% (nor is it of type any()).
                         %% TODO: Improper list?
                 end,
-            FinalElemTy = normalize(type(union, [Ty1|TailElemTys]),
+            FinalElemTy = least_upper_bound:normalize(type(union, [Ty1|TailElemTys]),
                                     Env#env.tenv),
             {type(nonempty_list, [FinalElemTy]), VB, Cs4}
     end;
@@ -1516,19 +594,14 @@ do_type_check_expr(#env{infer = false}, {char, _, _C}) ->
 
 %% When infer = true, we do propagate the types of literals,
 %% list cons, tuples, etc.
-do_type_check_expr(#env{infer = true}, {string, _, Chars}) ->
-    ActualyTy = infer_literal_string(Chars),
-    return(ActualyTy);
-do_type_check_expr(#env{infer = true}, {nil, _}) ->
-    return(type(nil));
-do_type_check_expr(#env{infer = true}, {atom, _, _} = Atom) ->
-    return(Atom);
-do_type_check_expr(#env{infer = true}, {integer, _, _N} = Integer) ->
-    return(Integer);
-do_type_check_expr(#env{infer = true}, {float, _, _F}) ->
-    return(type(float));
-do_type_check_expr(#env{infer = true}, {char, _, _C} = Char) ->
-    return(Char);
+do_type_check_expr(#env{infer = true}, Literal = {L, _, _})
+  when L == string;
+       L == nil;
+       L == atom;
+       L == integer;
+       L == float;
+       L == char->
+    type_inference:infer_literal_type(Literal);
 
 %% Maps
 do_type_check_expr(Env, {map, _, Assocs}) ->
@@ -1615,7 +688,7 @@ do_type_check_expr(Env, {'receive', _, Clauses}) ->
 do_type_check_expr(Env, {'receive', _, Clauses, _After, Block}) ->
     {TyClauses, VarBinds1, Cs1} = infer_clauses(Env, Clauses),
     {TyBlock,   VarBinds2, Cs2} = type_check_block(Env, Block),
-    {normalize({type, erl_anno:new(0), union, [TyClauses, TyBlock]}, Env#env.tenv)
+    {least_upper_bound:normalize({type, erl_anno:new(0), union, [TyClauses, TyBlock]}, Env#env.tenv)
     ,union_var_binds(VarBinds1, VarBinds2, Env#env.tenv)
     ,constraints:combine(Cs1, Cs2)};
 
@@ -1629,16 +702,16 @@ do_type_check_expr(Env, {op, _, '!', Proc, Val}) ->
     ,constraints:combine(Cs1, Cs2)};
 do_type_check_expr(Env, {op, P, 'not', Arg}) ->
     {Ty, VB, Cs1} = type_check_expr(Env, Arg),
-    case subtype(Ty, {type, P, boolean, []}, Env#env.tenv) of
+    case type_subtype:subtype(Ty, {type, P, boolean, []}, Env#env.tenv) of
         {true, Cs2} ->
-            NormTy = normalize(Ty, Env#env.tenv),
+            NormTy = least_upper_bound:normalize(Ty, Env#env.tenv),
             {negate_bool_type(NormTy), VB, constraints:combine(Cs1, Cs2)};
         false ->
             throw({type_error, non_boolean_argument_to_not, P, Ty})
     end;
 do_type_check_expr(Env, {op, P, 'bnot', Arg}) ->
     {Ty, VB, Cs1} = type_check_expr(Env, Arg),
-    case subtype(Ty, {type, P, integer, []}, Env#env.tenv) of
+    case type_subtype:subtype(Ty, {type, P, integer, []}, Env#env.tenv) of
         {true, Cs2} ->
             {type(integer), VB, constraints:combine(Cs1, Cs2)};
         false ->
@@ -1646,7 +719,7 @@ do_type_check_expr(Env, {op, P, 'bnot', Arg}) ->
     end;
 do_type_check_expr(Env, {op, P, '+', Arg}) ->
     {Ty, VB, Cs1} = type_check_expr(Env, Arg),
-    case subtype(Ty, {type, P, number ,[]}, Env#env.tenv) of
+    case type_subtype:subtype(Ty, {type, P, number ,[]}, Env#env.tenv) of
         {true, Cs2} ->
             {Ty, VB, constraints:combine(Cs1, Cs2)};
         false ->
@@ -1654,10 +727,10 @@ do_type_check_expr(Env, {op, P, '+', Arg}) ->
     end;
 do_type_check_expr(Env, {op, P, '-', Arg}) ->
     {Ty, VB, Cs1} = type_check_expr(Env, Arg),
-    case subtype(Ty, {type, P, number ,[]}, Env#env.tenv) of
+    case type_subtype:subtype(Ty, {type, P, number ,[]}, Env#env.tenv) of
         {true, Cs2} ->
-            NormTy = normalize(Ty, Env#env.tenv),
-            {negate_num_type(NormTy), VB, constraints:combine(Cs1, Cs2)};
+            NormTy = least_upper_bound:normalize(Ty, Env#env.tenv),
+            {type_integer:negate_num_type(NormTy), VB, constraints:combine(Cs1, Cs2)};
         false ->
             throw({type_error, non_number_argument_to_minus, P, Ty})
     end;
@@ -1701,7 +774,7 @@ do_type_check_expr(Env, {'try', _, Block, CaseCs, CatchCs, AfterBlock}) ->
                   {_TyA, _VB4, Cs5} = type_check_block(Env2, AfterBlock),
                   Cs5
           end,
-    {normalize({type, erl_anno:new(0), union, [Ty, TyC, TyS]}, Env#env.tenv)
+    {least_upper_bound:normalize({type, erl_anno:new(0), union, [Ty, TyC, TyS]}, Env#env.tenv)
     ,VB
     ,constraints:combine([Cs1,Cs2,Cs3,Cs4])}.
 
@@ -1776,7 +849,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
                 end
         end,
     {Ty1, VB1, Cs1} = type_check_expr(Env, Arg1),
-    case subtype(Ty1, {type, P, bool, []}, Env#env.tenv) of
+    case type_subtype:subtype(Ty1, {type, P, bool, []}, Env#env.tenv) of
         false ->
             throw({type_error, boolop, Op, P, Ty1});
         {true, Cs2} ->
@@ -1784,7 +857,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
             % Allow any() in second argument for shortcut operators
             SndArgTy = if Op == 'andalso'; Op == 'orelse' -> type(any);
                           true                            -> type(bool) end,
-            case subtype(Ty2, SndArgTy, Env#env.tenv) of
+            case type_subtype:subtype(Ty2, SndArgTy, Env#env.tenv) of
                 false ->
                     throw({type_error, boolop, Op, P, Ty2});
                 {true, Cs4} ->
@@ -1794,7 +867,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
                             'orelse'  -> type(union, [Ty1, {atom, erl_anno:new(0), true}]);
                             _         -> type(boolean)
                         end,
-                    {normalize(Inferred, Env#env.tenv)
+                    {least_upper_bound:normalize(Inferred, Env#env.tenv)
                     ,union_var_binds(VB1, VB2, Env#env.tenv)
                     ,constraints:combine([Cs1,Cs2,Cs3,Cs4])}
             end
@@ -1859,10 +932,10 @@ type_check_list_op(Env, Arg1, Arg2) ->
 
   ListTy = type(list),
 
-  case {subtype(Ty1, ListTy, Env#env.tenv)
-       ,subtype(Ty2, ListTy, Env#env.tenv)} of
+  case {type_subtype:subtype(Ty1, ListTy, Env#env.tenv)
+       ,type_subtype:subtype(Ty2, ListTy, Env#env.tenv)} of
     {{true, Cs3}, {true, Cs4}} ->
-      {normalize({type, erl_anno:new(0), union, [Ty1, Ty2]}, Env#env.tenv)
+      {least_upper_bound:normalize({type, erl_anno:new(0), union, [Ty1, Ty2]}, Env#env.tenv)
       ,union_var_binds(VB1, VB2, Env#env.tenv)
       ,constraints:combine([Cs1, Cs2, Cs3, Cs4])
       };
@@ -1928,21 +1001,21 @@ type_check_call_ty_union(Env, Tys, Args, E) ->
     {ResTys, VBs, Css} =
         lists:unzip3([type_check_call_ty(Env, Ty, Args, E)
                       || Ty <- Tys]),
-    {normalize(type(union, ResTys), Env#env.tenv),
+    {least_upper_bound:normalize(type(union, ResTys), Env#env.tenv),
      union_var_binds(VBs, Env#env.tenv),
      constraints:combine(Css)}.
 
 compat_arith_type(Any = {type, _, any, []}, {type, _, any, []}) ->
     {Any, constraints:empty()};
 compat_arith_type(Any = {type, _, any, []}, Ty) ->
-    case subtype(Ty, type(number), #tenv{}) of
+    case type_subtype:subtype(Ty, type(number), #tenv{}) of
         false ->
             false;
         _ ->
             {Any, constraints:empty()}
     end;
 compat_arith_type(Ty, Any = {type, _, any, []}) ->
-    case subtype(Ty, type(number), #tenv{}) of
+    case type_subtype:subtype(Ty, type(number), #tenv{}) of
         false ->
             false;
         _ ->
@@ -1950,20 +1023,20 @@ compat_arith_type(Ty, Any = {type, _, any, []}) ->
     end;
 compat_arith_type(Ty1, Ty2) ->
     TInteger = type(integer),
-    case {subtype(Ty1, TInteger, #tenv{})
-         ,subtype(Ty2, TInteger, #tenv{})} of
+    case {type_subtype:subtype(Ty1, TInteger, #tenv{})
+         ,type_subtype:subtype(Ty2, TInteger, #tenv{})} of
         {{true, C1}, {true, C2}} ->
             {TInteger, constraints:combine(C1, C2)};
         _ ->
             TFloat = type(float),
-            case {subtype(Ty1, TFloat, #tenv{})
-                 ,subtype(Ty2, TFloat, #tenv{})} of
+            case {type_subtype:subtype(Ty1, TFloat, #tenv{})
+                 ,type_subtype:subtype(Ty2, TFloat, #tenv{})} of
                 {{true, C1},{true, C2}} ->
                     {TFloat, constraints:combine(C1, C2)};
                 _ ->
                     TNumber = type(number),
-                    case {subtype(Ty1, TNumber, #tenv{})
-                         ,subtype(Ty2, TNumber, #tenv{})} of
+                    case {type_subtype:subtype(Ty1, TNumber, #tenv{})
+                         ,type_subtype:subtype(Ty2, TNumber, #tenv{})} of
                         {{true, C1},{true, C2}} ->
                             {TNumber, constraints:combine(C1, C2)};
                         _ ->
@@ -1987,7 +1060,7 @@ type_check_comprehension(Env, lc, Expr, []) ->
     {RetTy, #{}, Cs};
 type_check_comprehension(Env, bc, Expr, []) ->
     {Ty, _VB, Cs} = type_check_expr(Env, Expr),
-    RetTy = case normalize(Ty, Env#env.tenv) of
+    RetTy = case least_upper_bound:normalize(Ty, Env#env.tenv) of
                 {type, _, any, []} = Any ->
                     Any;
                 {type, _, binary, [{integer, _, 0}, {integer, _, _N}]} = BinType ->
@@ -2065,7 +1138,7 @@ type_check_expr_in(Env, ResTy, Expr) ->
             [type_print_errors:format_location(Expr, brief),
              erl_prettypr:format(Expr),
              typelib:pp_type(ResTy)]),
-    NormResTy = normalize(ResTy, Env#env.tenv),
+    NormResTy = least_upper_bound:normalize(ResTy, Env#env.tenv),
     ?throw_orig_type(do_type_check_expr_in(Env, NormResTy, Expr),
                      ResTy, NormResTy).
 
@@ -2074,7 +1147,7 @@ do_type_check_expr_in(Env, {type, _, any, []}, Expr) ->
     {VB, Cs};
 do_type_check_expr_in(Env, Ty, {var, _, Name} = Var) ->
     VarTy = maps:get(Name, Env#env.venv),
-    case subtype(VarTy, Ty, Env#env.tenv) of
+    case type_subtype:subtype(VarTy, Ty, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
@@ -2086,7 +1159,7 @@ do_type_check_expr_in(Env, Ty, {match, _, Pat, Expr}) ->
         add_type_pat(Pat, Ty, Env#env.tenv, Env#env.venv),
     {union_var_binds(VarBinds, NewVEnv, Env#env.tenv), constraints:combine(Cs, Cs2)};
 do_type_check_expr_in(Env, Ty, I = {integer, _, _}) ->
-    case subtype(I, Ty, Env#env.tenv) of
+    case type_subtype:subtype(I, Ty, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
@@ -2094,21 +1167,21 @@ do_type_check_expr_in(Env, Ty, I = {integer, _, _}) ->
     end;
 do_type_check_expr_in(Env, Ty, {float, _, _} = Float) ->
     ExpectedType = type(float),
-    case subtype(ExpectedType, Ty, Env#env.tenv) of
+    case type_subtype:subtype(ExpectedType, Ty, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
             throw({type_error, Float, ExpectedType, Ty})
     end;
 do_type_check_expr_in(Env, Ty, Atom = {atom, _, _}) ->
-    case subtype(Atom, Ty, Env#env.tenv) of
+    case type_subtype:subtype(Atom, Ty, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
             throw({type_error, Atom, Atom, Ty})
     end;
 do_type_check_expr_in(Env, Ty, Char = {char, _, _}) ->
-    case subtype(Char, Ty, Env#env.tenv) of
+    case type_subtype:subtype(Char, Ty, Env#env.tenv) of
         {true, Cs} ->
            {#{}, Cs};
        false ->
@@ -2132,15 +1205,15 @@ do_type_check_expr_in(Env, Ty, Cons = {cons, _, H, T}) ->
             throw({type_error, Cons, type(nonempty_list), Ty})
     end;
 do_type_check_expr_in(Env, Ty, {nil, _} = Nil) ->
-    case subtype(type(nil), Ty, Env#env.tenv) of
+    case type_subtype:subtype(type(nil), Ty, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
             throw({type_error, Nil, type(nil), Ty})
     end;
-do_type_check_expr_in(Env, Ty, {string, _, Chars} = String) ->
-    ActualTy = infer_literal_string(Chars),
-    case subtype(ActualTy, Ty, Env#env.tenv) of
+do_type_check_expr_in(Env, Ty, {string, _, _Chars} = String) ->
+    ActualTy = type_inference:infer_literal_type(String),
+    case type_subtype:subtype(ActualTy, Ty, Env#env.tenv) of
       {true, Cs} ->
         {#{}, Cs};
       false ->
@@ -2148,7 +1221,7 @@ do_type_check_expr_in(Env, Ty, {string, _, Chars} = String) ->
     end;
 do_type_check_expr_in(Env, Ty, {bin, _Anno, _BinElements} = Bin) ->
     BinTy = gradualizer_bin:compute_type(Bin),
-    Cs1 = case subtype(BinTy, Ty, Env#env.tenv) of
+    Cs1 = case type_subtype:subtype(BinTy, Ty, Env#env.tenv) of
               {true, Cs0} ->
                   Cs0;
               false ->
@@ -2183,7 +1256,7 @@ do_type_check_expr_in(Env, ResTy, {tuple, _, TS} = Tup) ->
 do_type_check_expr_in(Env, ResTy, {map, _, Assocs} = Map) ->
     {AssocTys, VBs, Cs2} = type_check_assocs(Env, Assocs),
     _MapTy = update_map_type(type(map, any), AssocTys),
-    case subtype(type(map, any), ResTy, Env#env.tenv) of
+    case type_subtype:subtype(type(map, any), ResTy, Env#env.tenv) of
         {true, Cs1} ->
             {VBs, constraints:combine(Cs1, Cs2)};
         false ->
@@ -2193,7 +1266,7 @@ do_type_check_expr_in(Env, ResTy, {map, _, Expr, Assocs} = Map) ->
     {Ty, VBExpr, Cs1} = type_check_expr(Env, Expr),
     {AssocTys, VBAssocs, Cs2} = type_check_assocs(Env, Assocs),
     UpdatedTy = update_map_type(Ty, AssocTys),
-    case subtype(UpdatedTy, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(UpdatedTy, ResTy, Env#env.tenv) of
         {true, Cs3} ->
             {union_var_binds(VBExpr, VBAssocs, Env#env.tenv),
              constraints:combine([Cs1, Cs2, Cs3])};
@@ -2239,7 +1312,7 @@ do_type_check_expr_in(Env, ResTy, {record, Anno, Exp, Name, Fields} = Record) ->
 do_type_check_expr_in(Env, ResTy, {record_field, Anno, Expr, Name, FieldWithAnno} = RecordField) ->
     Rec = get_record_fields(Name, Anno, Env#env.tenv),
     FieldTy = get_rec_field_type(FieldWithAnno, Rec),
-    case subtype(FieldTy, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(FieldTy, ResTy, Env#env.tenv) of
         {true, Cs1} ->
             RecTy = {type, erl_anno:new(0), record, [{atom, erl_anno:new(0), Name}]},
             {VarBinds, Cs2} = type_check_expr_in(Env, RecTy, Expr),
@@ -2251,7 +1324,7 @@ do_type_check_expr_in(Env, ResTy, {record_index, Anno, Name, FieldWithAnno} = Re
     RecFields = get_record_fields(Name, Anno, Env#env.tenv),
     Index = get_rec_field_index(FieldWithAnno, RecFields),
     IndexTy = {integer, erl_anno:new(0), Index},
-    case subtype(IndexTy, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(IndexTy, ResTy, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
@@ -2271,7 +1344,7 @@ do_type_check_expr_in(Env, ResTy,
   when TypeOp == '::'; TypeOp == ':::' ->
     try typelib:parse_type(TypeStr) of
         Type ->
-            case subtype(Type, ResTy, Env#env.tenv) of
+            case type_subtype:subtype(Type, ResTy, Env#env.tenv) of
                 {true, Cs1} when TypeOp == '::' ->
                     {VarBinds, Cs2} = type_check_expr_in(Env, Type, Expr),
                     {VarBinds, constraints:combine(Cs1, Cs2)};
@@ -2294,7 +1367,7 @@ do_type_check_expr_in(Env, ResTy,
     end;
 do_type_check_expr_in(Env, ResTy, {call, _, {atom, _, record_info}, [_, _]} = Call) ->
     Ty = get_record_info_type(Call, Env#env.tenv),
-    case subtype(Ty, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(Ty, ResTy, Env#env.tenv) of
         {true, Cs} ->
             {#{}, Cs};
         false ->
@@ -2337,14 +1410,14 @@ do_type_check_expr_in(Env, ResTy, Expr = {'fun', P, {function, Name, Arity}}) ->
             {#{}, constraints:empty()};
         ?type(any) ->
             FunType = create_fun_type(Arity, type(any)),
-            case subtype(FunType, ResTy, Env#env.tenv) of
+            case type_subtype:subtype(FunType, ResTy, Env#env.tenv) of
                 {true, Cs} -> {#{}, Cs};
                 false -> throw({type_error, Expr, FunType, ResTy})
             end;
         BoundedFunTypeList ->
             FunTypeList =
                 unfold_bounded_type_list(Env#env.tenv, BoundedFunTypeList),
-            case any_subtype(FunTypeList, ResTy, Env#env.tenv) of
+            case type_subtype:any_subtype(FunTypeList, ResTy, Env#env.tenv) of
                 {true, Cs} -> {#{}, Cs};
                 false -> throw({type_error, Expr, FunTypeList, ResTy})
             end
@@ -2356,7 +1429,7 @@ do_type_check_expr_in(Env, ResTy, Expr = {'fun', P, {function, M, F, A}}) ->
                 {ok, BoundedFunTypeList} ->
                     FunTypeList =
                         unfold_bounded_type_list(Env#env.tenv, BoundedFunTypeList),
-                    case any_subtype(FunTypeList, ResTy, Env#env.tenv) of
+                    case type_subtype:any_subtype(FunTypeList, ResTy, Env#env.tenv) of
                         {true, Cs} -> {#{}, Cs};
                         false -> throw({type_error, Expr, FunTypeList, ResTy})
                     end;
@@ -2474,7 +1547,7 @@ type_check_int_op_in(Env, ResTy, Op, P, Arg1, Arg2) ->
     type_check_arith_op_in(Env, integer, ResTy, Op, P, Arg1, Arg2).
 
 type_check_arith_op_in(Env, Kind, ResTy, Op, P, Arg1, Arg2) ->
-    {ResTy1, Cs} = glb(type(Kind), ResTy, Env#env.tenv),
+    {ResTy1, Cs} = greatest_lower_bound:glb(type(Kind), ResTy, Env#env.tenv),
     case ResTy1 of
         %% TODO: allow none() if checking against none()? Not clear that
         %% this is sensible, since in that case you'd like to only require
@@ -2564,9 +1637,9 @@ arith_op_arg_types(Op, Ty = {type, _, neg_integer, []}) ->
 %% This lets you work with types like
 %%  -type word16() :: 0..65535.
 arith_op_arg_types(Op, {type, _, range, _} = Ty) ->
-    case int_type_to_range(Ty) of
+    case type_integer:int_type_to_range(Ty) of
         {0, B} when Op == 'rem' ->
-            [TyR] = int_range_to_types({0, B + 1}),
+            [TyR] = type_integer:int_range_to_types({0, B + 1}),
             {type(non_neg_integer), TyR, constraints:empty()};
         %% bsr and div make things smaller for any non_neg/pos second argument
         {0, _} when Op == 'bsr' -> {Ty, type(non_neg_integer)
@@ -2619,7 +1692,7 @@ type_check_logic_op_in(Env, ResTy, Op, P, Arg1, Arg2) when Op == 'andalso'; Op =
                  'andalso' -> {atom, erl_anno:new(0), false};
                  'orelse'  -> {atom, erl_anno:new(0), true}
              end,
-    case subtype(Target, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(Target, ResTy, Env#env.tenv) of
         {true, Cs} ->
             {VarBinds1, Cs1} = type_check_expr_in(Env, Bool, Arg1),
             %% variable bindings are propagated from Arg1 to Arg2
@@ -2632,7 +1705,7 @@ type_check_logic_op_in(Env, ResTy, Op, P, Arg1, Arg2) when Op == 'andalso'; Op =
     end;
 type_check_logic_op_in(Env, ResTy, Op, P, Arg1, Arg2) ->
     Bool = type(boolean),
-    case subtype(Bool, ResTy, Env#env.tenv) of
+    case type_subtype:subtype(Bool, ResTy, Env#env.tenv) of
         {true, Cs} ->
           {VarBinds1, Cs1} = type_check_expr_in(Env, Bool, Arg1),
           {VarBinds2, Cs2} = type_check_expr_in(Env, Bool, Arg2),
@@ -2643,7 +1716,7 @@ type_check_logic_op_in(Env, ResTy, Op, P, Arg1, Arg2) ->
     end.
 
 type_check_rel_op_in(Env, ResTy, Op, P, Arg1, Arg2) ->
-    case subtype(type(boolean), ResTy, Env#env.tenv) of
+    case type_subtype:subtype(type(boolean), ResTy, Env#env.tenv) of
         {true, Cs0} ->
           {ResTy1, VarBinds1, Cs1} = type_check_expr(Env, Arg1),
           {ResTy2, VarBinds2, Cs2} = type_check_expr(Env, Arg2),
@@ -2666,7 +1739,7 @@ type_check_list_op_in(Env, ResTy, {op, P, Op, Arg1, Arg2} = Expr) ->
             '--' -> type(list, [type(term)]);
             '++' -> type(maybe_improper_list, [type(term), type(term)])
         end,
-    {ResTy1, Cs} = glb(Target, ResTy, Env#env.tenv),
+    {ResTy1, Cs} = greatest_lower_bound:glb(Target, ResTy, Env#env.tenv),
     case ResTy1 of
         {type, _, none, []} ->
             % Tested by test/should_fail/list_op.erl subtract/1
@@ -2721,7 +1794,7 @@ type_check_unary_op_in(Env, ResTy, Op, P, Arg) ->
             '+'    -> type(number);
             '-'    -> type(number)
         end,
-    {ResTy1, Cs} = glb(Target, ResTy, Env#env.tenv),
+    {ResTy1, Cs} = greatest_lower_bound:glb(Target, ResTy, Env#env.tenv),
     case ResTy1 of
         %% TODO: allow if ResTy == none()?
         {type, _, none, []} ->
@@ -2739,12 +1812,12 @@ unary_op_arg_type(Op, {type, P, union, Tys}) ->
     {type, P, union, [ unary_op_arg_type(Op, Ty) || Ty <- Tys ]};
 unary_op_arg_type('not', {atom, P, B}) -> {atom, P, not B}; %% boolean() = false | true
 unary_op_arg_type(Op, Ty) when ?is_int_type(Ty), Op == '-' orelse Op == 'bnot' ->
-    {Lo, Hi} = int_type_to_range(Ty),
+    {Lo, Hi} = type_integer:int_type_to_range(Ty),
     Neg = fun(pos_inf)             -> neg_inf;
              (neg_inf)             -> pos_inf;
              (N) when Op == '-'    -> -N;
              (N) when Op == 'bnot' -> bnot N end,
-    type(union, int_range_to_types({Neg(Hi), Neg(Lo)}));
+    type(union, type_integer:int_range_to_types({Neg(Hi), Neg(Lo)}));
 unary_op_arg_type('-', Ty = {type, _, float, []}) ->
     Ty.
 
@@ -2944,7 +2017,7 @@ type_check_call(Env, ResTy, {fun_ty, ArgsTy, FunResTy, Cs}, Args, {P, Name, _}) 
                                 type_check_expr_in(Env, ArgTy, Arg)
                         end, ArgsTy, Args)
          ),
-    case subtype(FunResTy, ResTy, Env#env.tenv) of
+        case type_subtype:subtype(FunResTy, ResTy, Env#env.tenv) of
         {true, Cs1} ->
             { union_var_binds(VarBindsList, Env#env.tenv)
             , constraints:combine([Cs, Cs1 | Css]) };
@@ -2958,7 +2031,7 @@ type_check_call(Env, ResTy, {fun_ty_any_args, FunResTy, Cs}, Args, {P, Name, _})
                             type_check_expr(Env, Arg)
                     end, Args)
          ),
-    case subtype(FunResTy, ResTy, Env#env.tenv) of
+        case type_subtype:subtype(FunResTy, ResTy, Env#env.tenv) of
         {true, Cs1} ->
             { union_var_binds(VarBindsList, Env#env.tenv)
             , constraints:combine([Cs, Cs1 | Css]) };
@@ -3118,7 +2191,7 @@ infer_clauses(Env, Clauses) ->
         lists:unzip3(lists:map(fun (Clause) ->
                                        infer_clause(Env, Clause)
                                end, Clauses)),
-    {normalize(type(union, Tys), Env#env.tenv)
+    {least_upper_bound:normalize(type(union, Tys), Env#env.tenv)
     ,union_var_binds(VarBindsList, Env#env.tenv)
     ,constraints:combine(Css)}.
 
@@ -3272,8 +2345,8 @@ refine_clause_arg_tys(Tys, _TysBounds, _Guards, _TEnv) ->
 %% Normalize, refine, revert normalize if no refinement.
 %% May throw no_refinement.
 refine(OrigTy, Ty, TEnv) ->
-    NormTy = normalize(OrigTy, TEnv),
-    case refine_ty(NormTy, normalize(Ty, TEnv), TEnv) of
+    NormTy = least_upper_bound:normalize(OrigTy, TEnv),
+    case refine_ty(NormTy, least_upper_bound:normalize(Ty, TEnv), TEnv) of
         NormTy -> OrigTy;
         RefTy  -> RefTy
     end.
@@ -3294,7 +2367,7 @@ refine_ty(?type(union, UnionTys), Ty, TEnv) ->
                              end
                           end,
                           [], UnionTys),
-    normalize(type(union, RefTys), TEnv);
+    least_upper_bound:normalize(type(union, RefTys), TEnv);
 refine_ty(?type(tuple, Tys1), ?type(tuple, Tys2), TEnv)
   when length(Tys1) > 0, length(Tys1) == length(Tys2) ->
     %% Non-empty tuple
@@ -3302,7 +2375,7 @@ refine_ty(?type(tuple, Tys1), ?type(tuple, Tys2), TEnv)
     %% {a|b, a|b} \ {a,a} => {b, a|b}, {a|b, b}
     TuplesElems = pick_one_refinement_each(Tys1, RefTys),
     Tuples = [type(tuple, TupleElems) || TupleElems <- TuplesElems],
-    normalize(type(union, Tuples), TEnv);
+    least_upper_bound:normalize(type(union, Tuples), TEnv);
 refine_ty({ann_type, _, [_, Ty1]}, Ty2, TEnv) ->
     refine_ty(Ty1, Ty2, TEnv);
 refine_ty(Ty1, {ann_type, _, [_, Ty2]}, TEnv) ->
@@ -3324,23 +2397,23 @@ refine_ty(Ty, {Tag, _, V}, TEnv) when ?is_int_type(Ty),
         ?type(non_neg_integer) when V < 0  -> throw(disjoint);
         ?type(pos_integer)     when V =< 0 -> throw(disjoint);
 	?type(pos_integer) ->
-	    Tys = int_range_to_types({1, V - 1}) ++
-		  int_range_to_types({V + 1, pos_inf}),
-	    normalize(type(union, Tys), TEnv);
+	    Tys = type_integer:int_range_to_types({1, V - 1}) ++
+		  type_integer:int_range_to_types({V + 1, pos_inf}),
+	    least_upper_bound:normalize(type(union, Tys), TEnv);
         ?type(neg_integer)     when V >= 0 -> throw(disjoint);
 	?type(neg_integer) ->
-	    Tys = int_range_to_types({neg_inf, V - 1}) ++
-		  int_range_to_types({V + 1, -1}),
-	    normalize(type(union, Tys), TEnv);
+	    Tys = type_integer:int_range_to_types({neg_inf, V - 1}) ++
+		  type_integer:int_range_to_types({V + 1, -1}),
+	    least_upper_bound:normalize(type(union, Tys), TEnv);
         ?type(integer)         when V == 0 ->
             type(union, [type(neg_integer), type(pos_integer)]);
         ?type(range, [{_TagLo, _, Lo}, {_TagHi, _, Hi}]) ->
             if
                 Lo =< V, V =< Hi ->
                     %% It's in the range
-                    Tys = int_range_to_types({Lo, V - 1}) ++
-                          int_range_to_types({V + 1, Hi}),
-                    normalize(type(union, Tys), TEnv);
+                    Tys = type_integer:int_range_to_types({Lo, V - 1}) ++
+                          type_integer:int_range_to_types({V + 1, Hi}),
+                    least_upper_bound:normalize(type(union, Tys), TEnv);
                 true ->
                     throw(disjoint)
             end;
@@ -3349,7 +2422,7 @@ refine_ty(Ty, {Tag, _, V}, TEnv) when ?is_int_type(Ty),
             throw(no_refinement)
     end;
 refine_ty(Ty1, Ty2, TEnv) ->
-    case glb(Ty1, Ty2, TEnv) of
+    case greatest_lower_bound:glb(Ty1, Ty2, TEnv) of
         {?type(none), _}  -> throw(disjoint);     %% disjoint
         _NotDisjoint -> throw(no_refinement) %% imprecision
     end.
@@ -3448,7 +2521,7 @@ add_types_pats([], [], _TEnv, VEnv, PatTysAcc, UBoundsAcc, CsAcc) ->
     {lists:reverse(PatTysAcc), lists:reverse(UBoundsAcc),
      VEnv, constraints:combine(CsAcc)};
 add_types_pats([Pat | Pats], [Ty | Tys], TEnv, VEnv, PatTysAcc, UBoundsAcc, CsAcc) ->
-    NormTy = normalize(Ty, TEnv),
+    NormTy = least_upper_bound:normalize(Ty, TEnv),
     {PatTyNorm, UBoundNorm, VEnv2, Cs1} =
         ?throw_orig_type(add_type_pat(Pat, NormTy, TEnv, VEnv),
                          Ty, NormTy),
@@ -3473,7 +2546,7 @@ add_type_pat({var, _, A} = Var, Ty, TEnv, VEnv) ->
     %% TODO: In a fun clause, A is always free, but not in e.g. case clauses
     case VEnv of
         #{A := VarTy} ->
-            case subtype(VarTy, Ty, TEnv) of
+            case type_subtype:subtype(VarTy, Ty, TEnv) of
                 {true, Cs} ->
                     {type(none), VarTy, VEnv, Cs};
                 false ->
@@ -3507,28 +2580,28 @@ add_type_pat(Pat, ?type(union, UnionTys)=UnionTy, TEnv, VEnv) ->
         _SomeTysMatched ->
             %% TODO: The constraints should be merged with *or* semantics
             %%       and var binds with intersection
-	    {Ty, Cs} = glb(PatTys, TEnv),
+	    {Ty, Cs} = greatest_lower_bound:glb(PatTys, TEnv),
             {Ty,
-             normalize(type(union, UBounds), TEnv),
+             least_upper_bound:normalize(type(union, UBounds), TEnv),
              union_var_binds(VEnvs, TEnv),
              constraints:combine([Cs|Css])}
     end;
 add_type_pat(Lit = {integer, P, _}, Ty, TEnv, VEnv) ->
-    case subtype(Lit, Ty, TEnv) of
+    case type_subtype:subtype(Lit, Ty, TEnv) of
         {true, Cs} ->
             {Lit, Lit, VEnv, Cs};
         false ->
             throw({type_error, pattern, P, Lit, Ty})
     end;
 add_type_pat(Lit = {char, P, Val}, Ty, TEnv, VEnv) ->
-    case subtype({integer, P, Val}, Ty, TEnv) of
+    case type_subtype:subtype({integer, P, Val}, Ty, TEnv) of
         {true, Cs} ->
             {Lit, Lit, VEnv, Cs};
         false ->
             throw({type_error, pattern, P, Lit, Ty})
     end;
 add_type_pat(Lit = {float, P, _}, Ty, TEnv, VEnv) ->
-    case subtype(type(float), Ty, TEnv) of
+    case type_subtype:subtype(type(float), Ty, TEnv) of
         {true, Cs} ->
             {type(none), type(float), VEnv, Cs};
         false ->
@@ -3551,14 +2624,14 @@ add_type_pat(Tuple = {tuple, P, Pats}, Ty, TEnv, VEnv) ->
             throw({type_error, pattern, P, Tuple, Ty})
     end;
 add_type_pat(Atom = {atom, P, _}, Ty, TEnv, VEnv) ->
-    case subtype(Atom, Ty, TEnv) of
+    case type_subtype:subtype(Atom, Ty, TEnv) of
         {true, Cs} ->
             {Atom, Atom, VEnv, Cs};
         false ->
             throw({type_error, pattern, P, Atom, Ty})
     end;
 add_type_pat(Nil = {nil, P}, Ty, TEnv, VEnv) ->
-    case subtype(NilTy = type(nil), Ty, TEnv) of
+    case type_subtype:subtype(NilTy = type(nil), Ty, TEnv) of
         {true, Cs} ->
             {NilTy, NilTy, VEnv, Cs};
         false ->
@@ -3566,22 +2639,22 @@ add_type_pat(Nil = {nil, P}, Ty, TEnv, VEnv) ->
     end;
 add_type_pat(CONS = {cons, P, PH, PT}, ListTy, TEnv, VEnv) ->
     %% TODO: Return non-empty list type as upper bound.
-    case expect_list_type(normalize(ListTy, TEnv), dont_allow_nil_type, TEnv) of
+    case expect_list_type(least_upper_bound:normalize(ListTy, TEnv), dont_allow_nil_type, TEnv) of
         any ->
             VEnv2 = add_any_types_pat(PH, VEnv),
-            TailTy = normalize(type(union, [ListTy, type(nil)]), TEnv),
+            TailTy = least_upper_bound:normalize(type(union, [ListTy, type(nil)]), TEnv),
             {_TailPatTy, _TauUBound, VEnv3, Cs} = add_type_pat(PT, TailTy, TEnv, VEnv2),
             {type(none), ListTy, VEnv3, Cs};
         {elem_ty, ElemTy, Cs1} ->
             {_PatTy1, _UBound1, VEnv2, Cs2} = add_type_pat(PH, ElemTy, TEnv, VEnv),
-            TailTy = normalize(type(union, [ListTy, type(nil)]), TEnv),
+            TailTy = least_upper_bound:normalize(type(union, [ListTy, type(nil)]), TEnv),
             {_PatTy2, _Ubound2, VEnv3, Cs3} = add_type_pat(PT, TailTy, TEnv, VEnv2),
             {type(none), ListTy, VEnv3, constraints:combine([Cs1, Cs2, Cs3])};
         {type_error, _Ty} ->
             throw({type_error, cons_pat, P, CONS, ListTy})
     end;
 add_type_pat(String = {string, P, _}, Ty, TEnv, VEnv) ->
-    case subtype(type(string), Ty, TEnv) of
+    case type_subtype:subtype(type(string), Ty, TEnv) of
         {true, Cs} ->
             {type(none), type(string), VEnv, Cs};
         false ->
@@ -3590,7 +2663,7 @@ add_type_pat(String = {string, P, _}, Ty, TEnv, VEnv) ->
 add_type_pat({bin, _P, BinElements} = Bin, Ty, TEnv, VEnv) ->
     %% Check the size parameters of the bit pattern
     BinTy = gradualizer_bin:compute_type(Bin),
-    Cs1 = case subtype(BinTy, Ty, TEnv) of
+    Cs1 = case type_subtype:subtype(BinTy, Ty, TEnv) of
               {true, Cs0} ->
                   Cs0;
               false ->
@@ -3649,13 +2722,13 @@ add_type_pat({match, _, Pat1, {var, _, _Var}=Pat2}, Ty, TEnv, VEnv) ->
     %% Refine using Pat1 first to be able to bind Pat2 to a refined type.
     {PatTy1, Ty1, VEnv1, Cs2} = add_type_pat(Pat1, Ty, TEnv, VEnv),
     {PatTy2, Ty2, VEnv2, Cs1} = add_type_pat(Pat2, Ty1, TEnv, VEnv1),
-    {GlbTy, Cs3} = glb(PatTy1, PatTy2, TEnv),
+    {GlbTy, Cs3} = greatest_lower_bound:glb(PatTy1, PatTy2, TEnv),
     {GlbTy, Ty2, VEnv2, constraints:combine([Cs1, Cs2, Cs3])};
 add_type_pat({match, _, Pat1, Pat2}, Ty, TEnv, VEnv) ->
     %% Use the refined type of Pat2 to bind vars in Pat1.
     {PatTy1, Ty1, VEnv1, Cs1} = add_type_pat(Pat2, Ty, TEnv, VEnv),
     {PatTy2, Ty2, VEnv2, Cs2} = add_type_pat(Pat1, Ty1, TEnv, VEnv1),
-    {GlbTy, Cs3} = glb(PatTy1, PatTy2, TEnv),
+    {GlbTy, Cs3} = greatest_lower_bound:glb(PatTy1, PatTy2, TEnv),
     {GlbTy, Ty2, VEnv2, constraints:combine([Cs1, Cs2, Cs3])};
 add_type_pat({op, _, '++', Pat1, Pat2}, Ty, TEnv, VEnv) ->
     {_, _, VEnv1, Cs1} = add_type_pat(Pat1, Ty, TEnv, VEnv),
@@ -3873,17 +2946,6 @@ type_of_bin_element({bin_element, _P, Expr, _Size, Specifiers}) ->
 
 %%% Helper functions
 
-type(Name, Args) ->
-    {type, erl_anno:new(0), Name, Args}.
-
-type(Name) -> type(Name, []).
-
-type_var(Name) ->
-    {var, erl_anno:new(0), Name}.
-
-return(X) ->
-    { X, #{}, constraints:empty() }.
-
 verbose(Env, Fmt, Args) ->
     Env#env.verbose andalso io:format(Fmt, Args).
 
@@ -3903,7 +2965,7 @@ union_var_binds([], _) ->
     #{};
 union_var_binds(VarBindsList, TEnv) ->
     % TODO: Don't drop the constraints
-    Glb = fun(_K, Ty1, Ty2) -> {Ty, _Cs} = glb(Ty1, Ty2, TEnv), Ty end,
+    Glb = fun(_K, Ty1, Ty2) -> {Ty, _Cs} = greatest_lower_bound:glb(Ty1, Ty2, TEnv), Ty end,
     union_var_binds_help(VarBindsList, Glb).
 
 %% Tail recursive helper.
@@ -3914,7 +2976,7 @@ union_var_binds_help([VB], _) -> VB.
 
 add_var_binds(VEnv, VarBinds, TEnv) ->
     % TODO: Don't drop the constraints
-    Glb = fun(_K, Ty1, Ty2) -> {Ty, _C} = glb(Ty1, Ty2, TEnv), Ty end,
+    Glb = fun(_K, Ty1, Ty2) -> {Ty, _C} = greatest_lower_bound:glb(Ty1, Ty2, TEnv), Ty end,
     gradualizer_lib:merge_with(Glb, VEnv, VarBinds).
 
 get_rec_field_type(FieldWithAnno, RecFields) ->

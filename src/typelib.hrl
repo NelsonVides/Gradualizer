@@ -1,3 +1,47 @@
+-export_type([typed_record_field/0]).
+
+-type type() :: gradualizer_type:abstract_type().
+
+%% Pattern macros
+-define(type(T), {type, _, T, []}).
+-define(type(T, A), {type, _, T, A}).
+
+%% Data collected from epp parse tree
+-record(parsedata, {
+          module             :: atom(),
+          export_all = false :: boolean(),
+          exports    = []    :: [{atom(), integer()}],
+          imports    = []    :: [{module(), atom(), integer()}],
+          specs      = []    :: list(),
+          types      = []    :: list(),
+          opaques    = []    :: list(),
+          records    = []    :: list(),
+          functions  = []    :: list()
+         }).
+
+-type typed_record_field() :: {typed_record_field,
+                               {record_field, erl_anno:anno(), Name :: {atom, erl_anno:anno(), atom()},
+                                DefaultValue :: gradualizer_type:abstract_expr()},
+                                Type :: type()}.
+
+%% Type environment, passed around while comparing compatible subtypes
+-record(tenv, {module :: module(),
+               types = #{} :: #{{Name :: atom(), arity()} => {Params :: [atom()],
+                                                              Body :: type()}},
+               records = #{} :: #{Name :: atom()          => [typed_record_field()]}
+              }).
+
+%%% The environment passed around during typechecking.
+-record(env, {fenv     = #{}
+             ,imported = #{}   :: #{{atom(), arity()} => module()}
+             ,venv     = #{}
+             ,tenv             :: #tenv{}
+             ,infer    = false :: boolean()
+             ,verbose  = false :: boolean()
+             ,exhaust  = true  :: boolean()
+             %,tyvenv  = #{}
+             }).
+
 %% convenience guards
 
 %% same as typechecker:is_int_type/2 but can be used as a guard

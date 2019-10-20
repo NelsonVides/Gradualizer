@@ -1,12 +1,18 @@
 %% @doc Functions operating on types on the Erlang Abstract Form
 -module(typelib).
+-include("typelib.hrl").
 
 -export([remove_pos/1, annotate_user_types/2, get_module_from_annotation/1,
          substitute_type_vars/2,
          pp_type/1, debug_type/3, parse_type/1]).
--export_type([constraint/0, function_type/0, extended_type/0]).
 
--type type() :: gradualizer_type:abstract_type().
+-export([type/2, type/1, type_var/1, return/1, ret/1,
+         new_type_var/0, negate_bool_type/1,
+         list_view/1, from_list_view/1,
+         get_record_fields/3
+        ]).
+
+-export_type([constraint/0, function_type/0, extended_type/0, list_view/0]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Parsing and pretty printing types
@@ -105,7 +111,7 @@ remove_pos({type, _, 'fun', [{type, _, any}, RetTy]}) ->
     {type, erl_anno:new(0), 'fun', [{type, erl_anno:new(0), any}
                                    ,remove_pos(RetTy)]};
 remove_pos({type, _, Type, Params}) when is_list(Params) ->
-    {type, erl_anno:new(0), Type, lists:map(fun remove_pos/1, Params)};
+    {type, erl_anno:new(0), Type, lists:map(fun typelib:remove_pos/1, Params)};
 remove_pos({type, _, Type, any}) when Type == tuple; Type == map ->
     {type, erl_anno:new(0), Type, any};
 remove_pos({type, _, Assoc, Tys}) when Assoc == map_field_exact;
@@ -190,3 +196,85 @@ substitute_type_vars(Other = {op, _, _Op, _Arg1, _Arg2}, _) ->
 substitute_type_vars(Other = {T, _, _}, _)
   when T == atom; T == integer; T == char ->
     Other.
+
+
+%%% Helper functions
+type(Name, Args) ->
+    {type, erl_anno:new(0), Name, Args}.
+
+type(Name) -> type(Name, []).
+
+type_var(Name) ->
+    {var, erl_anno:new(0), Name}.
+
+return(X) ->
+    { X, #{}, constraints:empty() }.
+
+%% Returns a successful matching of two types. Convenience function for when
+%% there were no type variables involved.
+ret(A) ->
+    {A, constraints:empty()}.
+
+
+new_type_var() ->
+    I = erlang:unique_integer(),
+    "_TyVar" ++ integer_to_list(I).
+
+-type list_view() :: {empty | nonempty | any | none, type(), type()}.
+
+-spec list_view(type()) -> false | list_view().
+list_view(Ty = {type, _, T, Args}) when ?is_list_type(Ty) ->
+    Empty =
+        case T of
+            nil                          -> empty;
+            list                         -> any;
+            nonempty_list                -> nonempty;
+            maybe_improper_list          -> any;
+            nonempty_improper_list       -> nonempty;
+            nonempty_maybe_improper_list -> nonempty
+        end,
+    Elem =
+        case Args of
+            []      -> type(any);
+            [A | _] -> A
+        end,
+    Term =
+        case Args of
+            _ when T == nil; T == list; T == nonempty_list ->
+                type(nil);
+            [_, B] -> B;
+            _ -> type(any)  %% Don't think we get here
+        end,
+    {Empty, Elem, Term};
+list_view(_) -> false.
+
+negate_bool_type({atom, P, true}) ->
+    {atom, P, false};
+negate_bool_type({atom, P, false}) ->
+    {atom, P, true};
+negate_bool_type(Ty) ->
+    Ty.
+
+-spec from_list_view(typelib:list_view()) -> type().
+from_list_view({_, _, {type, _, none, []}}) -> type(none);
+from_list_view({empty, _, _}) -> type(nil);
+from_list_view({none, _, _}) -> type(none);
+from_list_view({Empty, Elem, {type, _, nil, []}}) ->
+    case Empty of
+        any      -> type(list, [Elem]);
+        nonempty -> type(nonempty_list, [Elem])
+    end;
+from_list_view({Empty, Elem, Term}) ->
+    case Empty of
+        any      -> type(maybe_improper_list, [Elem, Term]);
+        nonempty -> type(nonempty_improper_list, [Elem, Term])
+    end.
+
+get_record_fields(RecName, Anno, #tenv{records = REnv}) ->
+    case REnv of
+        #{RecName := Fields} ->
+            Fields;
+        _NotFound ->
+            throw({undef, record, Anno, RecName})
+    end.
+

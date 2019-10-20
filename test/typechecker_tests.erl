@@ -254,16 +254,16 @@ normalize_test_() ->
     [
      {"Merge intervals",
       ?_assertEqual(?t( 1..6 ),
-                    typechecker:normalize(?t( 1..3|4..6 ),
+                    least_upper_bound:normalize(?t( 1..3|4..6 ),
                                           typechecker:create_tenv(?MODULE, [], [])))},
      {"Remove singleton atoms if atom() is present",
       ?_assertEqual(?t( atom() ),
-                    typechecker:normalize(?t( a | atom() | b ),
+                    least_upper_bound:normalize(?t( a | atom() | b ),
                                           typechecker:create_tenv(?MODULE, [], [])))},
      {"Evaluate numeric operators in types",
       %% ?t(-8) is parsed as {op,0,'-',{integer,0,8}}
       ?_assertEqual({integer, 0 , -8},
-                    typechecker:normalize(?t( (bnot 3) *
+                    least_upper_bound:normalize(?t( (bnot 3) *
                                               (( + 7 ) rem ( 5 div - 2 ) ) bxor
                                               (1 bsl 6 bsr 4) ),
                                           typechecker:create_tenv(?MODULE, [], [])))}
@@ -575,7 +575,7 @@ cleanup_app(Apps) ->
     ok.
 
 subtype(T1, T2) ->
-    case typechecker:subtype(T1, T2, typechecker:create_tenv(?MODULE, [], [])) of
+    case type_subtype:subtype(T1, T2, typechecker:create_tenv(?MODULE, [], [])) of
         {true, _} ->
             true;
         false ->
@@ -586,13 +586,13 @@ glb(T1, T2) ->
     glb(T1, T2, typechecker:create_tenv(?MODULE, [], [])).
 
 glb(T1, T2, Env) ->
-    typechecker:glb(T1, T2, Env).
+    greatest_lower_bound:glb(T1, T2, Env).
 
 deep_normalize(T) ->
     deep_normalize(T, typechecker:create_tenv(?MODULE, [], [])).
 
 deep_normalize(T, TEnv) ->
-    case typechecker:normalize(T, TEnv) of
+    case least_upper_bound:normalize(T, TEnv) of
         {type, P, N, Args} when is_list(Args) ->
             {type, P, N, [ deep_normalize(A, TEnv) || A <- Args ]};
         TN -> TN
