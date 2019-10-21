@@ -5,6 +5,8 @@
          refined_types_makes_it_fail/2
         ]).
 
+-gradualizer(infer).
+
 -spec fun_wrong_arity(any()) -> boolean().
 fun_wrong_arity(Fun) when is_function(Fun, 2) ->
     Fun(0);

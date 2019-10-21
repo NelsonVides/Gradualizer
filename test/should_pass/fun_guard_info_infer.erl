@@ -2,11 +2,11 @@
 -export([
          fun_correct_arity/1,
          fun_unspecified_arity/1,
-         fun_different_variables/2,
-         my_sleep/1
+         fun_different_variables/2
+         % my_sleep/1
         ]).
 
--gradualizer({infer, true}).
+-gradualizer(infer).
 
 -spec fun_correct_arity(any()) -> boolean().
 fun_correct_arity(Fun) when is_function(Fun, 2) ->
@@ -25,6 +25,6 @@ fun_different_variables(A,B)
     ok.
 
 %% no spec
-my_sleep(N) when is_integer(N), N > 0 -> timer:sleep(N);
-my_sleep(true) -> timer:sleep(1000);
-my_sleep(false) -> ok.
+% my_sleep(N) when is_integer(N), N > 0 -> timer:sleep(N);
+% my_sleep(true) -> timer:sleep(1000);
+% my_sleep(false) -> ok.

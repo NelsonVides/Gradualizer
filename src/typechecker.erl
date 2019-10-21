@@ -1364,7 +1364,7 @@ subst_ty(_, Ty) -> Ty.
 %% the expression together with their type and constraints.
 %-spec type_check_expr(#env, any()) -> { any(), #{ any() => any()}, #{ any() => any()} }.
 type_check_expr(Env, Expr) ->
-    io:format("type_check_expr Expr ~p~n", [Expr]),
+    % io:format("type_check_expr Expr ~p~n", [Expr]),
     Res = {Ty, _VarBinds, _Cs} = do_type_check_expr(Env, Expr),
     ?verbose(Env, "~sPropagated type of ~ts :: ~ts~n",
              [format_location(Expr, brief), erl_prettypr:format(Expr), typelib:pp_type(Ty)]),
@@ -1804,7 +1804,7 @@ type_check_logic_op(Env, Op, P, Arg1, Arg2) ->
     end.
 
 type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
-    io:format("in type_check_rel_op~n"),
+    % io:format("in type_check_rel_op~n"),
     case {type_check_expr(Env, Arg1), type_check_expr(Env, Arg2)} of
         {{Ty1, VB1, Cs1}, {Ty2, VB2, Cs2}} ->
             case compatible(Ty1, Ty2, Env#env.tenv) of
@@ -1821,7 +1821,7 @@ type_check_rel_op(Env, Op, P, Arg1, Arg2) ->
                                 type(boolean)
                         end,
                     MergedVB = merge_types_on_equality(Env, Op,{Arg1,Ty1},{Arg2,Ty2}),
-                    io:format("MergedVB ~p~n", [MergedVB]),
+                    % io:format("MergedVB ~p~n", [MergedVB]),
                     {RetType
                     ,union_var_binds([VB1, VB2, MergedVB], Env#env.tenv)
                     ,constraints:combine([Cs,Cs1,Cs2])};
@@ -1838,16 +1838,16 @@ merge_types_on_equality(Env, RelOp, V1, V2 = {?type(var), _})
     merge_types_on_equality(Env, RelOp, V2, V1);
 merge_types_on_equality(Env, RelOp, {{var, _, Var}, Ty1}, {Arg2, Ty2})
   when (RelOp =:= '=:='); (RelOp =:= '==') ->
-    io:format("merge_types_on_equality~n"
-              "First:   Var ~p~n"
-              "         Ty1 ~p~n"
-              "Second:  Arg2 ~p~n"
-              "         Ty2 ~p~n",
-              [Var, Ty1, Arg2, Ty2]),
+    % io:format("merge_types_on_equality~n"
+    %           "First:   Var ~p~n"
+    %           "         Ty1 ~p~n"
+    %           "Second:  Arg2 ~p~n"
+    %           "         Ty2 ~p~n",
+    %           [Var, Ty1, Arg2, Ty2]),
     {Ty,_} = glb(Ty1, Ty2, Env#env.tenv),
     #{Var => Ty};
 merge_types_on_equality(_Env, _Op, _X1, _X2) ->
-    io:format("in no match~n"),
+    % io:format("in no match~n"),
     #{}.
 
 type_check_arith_op(Env, Op, P, Arg1, Arg2) ->
@@ -1892,7 +1892,7 @@ type_check_list_op(Env, Arg1, Arg2) ->
       ,constraints:combine([Cs1, Cs2, Cs3, Cs4])
       };
     {false, _} ->
-      io:format("ARE WE HERE? ~n", []),
+      % io:format("ARE WE HERE? ~n", []),
       throw({type_error, Arg1, Ty1, type(list)});
     {_, false} ->
         throw({type_error, Arg2, Ty2, type(list)})
@@ -3261,7 +3261,7 @@ check_clause(Env, ArgsTy, ResTy, C = {clause, P, Args, Guards, Block}) ->
     %% Here I want to simply check if the block inside the clause typechecks,
     %% taking the refined guards into consideration
     VarBinds1   = check_guards(EnvNew, Guards, P),
-    EnvNewest   = EnvNew#env{ venv = refine_var_binds(EnvNew#env.venv, VarBinds1, Env#env.tenv) },
+    EnvNewest   = EnvNew#env{ venv = refine_var_binds(EnvNew, EnvNew#env.venv, VarBinds1, Env#env.tenv) },
     {VarBinds2, Cs2} = type_check_block_in(EnvNewest, ResTy, Block),
     %%%
     RefinedTys  = refine_clause_arg_tys(ArgsTy, PatTys,
@@ -3271,7 +3271,7 @@ check_clause(Env, ArgsTy, ResTy, C = {clause, P, Args, Guards, Block}) ->
      ,constraints:combine(Cs1, Cs2)};
 %% DEBUG
 check_clause(_Env, _ArgsTy, _ResTy, Term) ->
-    io:format("DEBUG: check_clause term: ~p~n", [Term]),
+    % io:format("DEBUG: check_clause term: ~p~n", [Term]),
     throw(check_clause).
 
 %% Refine types by matching clause. MatchedTys are the types exhausted by
@@ -3456,7 +3456,7 @@ normalize_any(T) ->
 
 %% Here at least one GuardSeq should be true, so we calculate the least upper bound
 check_guards(Env, Guards, P) ->
-    io:format("In check_guard:~n   Guards were ~p~n", [Guards]),
+    % io:format("In check_guard:~n   Guards were ~p~n", [Guards]),
     X = lists:map(fun(GuardSeq) ->
                           check_guards_sequence(Env, GuardSeq)
                   end, Guards),
@@ -3465,16 +3465,16 @@ check_guards(Env, Guards, P) ->
                   normalize_any(NTy)
           end,
     VarBinds = union_var_binds_help(X, Lub),
-    io:format("Env ~p~n", [Env]),
-    io:format("X ~p~n", [X]),
-    io:format("VarBinds ~p~n", [VarBinds]),
+    % io:format("Env ~p~n", [Env]),
+    % io:format("X ~p~n", [X]),
+    % io:format("VarBinds ~p~n", [VarBinds]),
     fail_if_unreachable_clause(VarBinds, P).
 
 %% Here, all Guards must be true, hence we calculate the greatest lower bound
 check_guards_sequence(Env, GuardSeq) ->
     RefTys = union_var_binds(
       lists:map(fun(Guard) ->
-                        io:format("going into ~p~n", [Guard]),
+                        % io:format("going into ~p~n", [Guard]),
                         when_guard_test(Env, Guard)
                 end, GuardSeq),
       Env#env.tenv),
@@ -3522,7 +3522,7 @@ when_guard_test(Env, {call, P, {remote,_,_,{atom, _, Fun}}, Vars}) ->
 % If Gt is a variable pattern V, then Rep(Gt) = {var,LINE,A}, where A is an atom with a printname consisting of the same characters as V.
 when_guard_test(Env, Guard) ->
     {Ty, VB, _Cs} = type_check_expr(Env, Guard), % Do we need to thread the Env?
-    io:format("Type extracted from type_check_expr ~p;~p~n", [Ty,VB]),
+    % io:format("Type extracted from type_check_expr ~p;~p~n", [Ty,VB]),
     VB.
 
 % {function,LINE,Name,Arity,[Rep(Fc_1), ...,Rep(Fc_k)]}.
@@ -4066,7 +4066,9 @@ add_var_binds(VEnv, VarBinds, TEnv) ->
     Glb = fun(_K, Ty1, Ty2) -> {Ty, _C} = glb(Ty1, Ty2, TEnv), Ty end,
     gradualizer_lib:merge_with(Glb, VEnv, VarBinds).
 
-refine_var_binds(VEnv, VarBinds, TEnv) ->
+refine_var_binds(#env{infer = false}, VEnv, VarBinds, TEnv) ->
+    add_var_binds(VEnv, VarBinds, TEnv);
+refine_var_binds(#env{infer = true}, VEnv, VarBinds, TEnv) ->
     Glb = fun(_, Ty1, ?type(any)) -> Ty1;
              (_, ?type(any), Ty2) -> Ty2;
              (_K, Ty1, Ty2) ->
