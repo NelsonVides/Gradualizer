@@ -594,13 +594,13 @@ do_type_check_expr(#env{infer = false}, {char, _, _C}) ->
 
 %% When infer = true, we do propagate the types of literals,
 %% list cons, tuples, etc.
-do_type_check_expr(#env{infer = true}, Literal = {L, _, _})
-  when L == string;
-       L == nil;
-       L == atom;
-       L == integer;
-       L == float;
-       L == char->
+do_type_check_expr(#env{infer = true}, Literal)
+  when element(1,Literal) == string;
+       element(1,Literal) == nil;
+       element(1,Literal) == atom;
+       element(1,Literal) == integer;
+       element(1,Literal) == float;
+       element(1,Literal) == char->
     type_inference:infer_literal_type(Literal);
 
 %% Maps
@@ -1212,7 +1212,7 @@ do_type_check_expr_in(Env, Ty, {nil, _} = Nil) ->
             throw({type_error, Nil, type(nil), Ty})
     end;
 do_type_check_expr_in(Env, Ty, {string, _, _Chars} = String) ->
-    ActualTy = type_inference:infer_literal_type(String),
+    {ActualTy, _, _} = type_inference:infer_literal_type(String),
     case type_subtype:subtype(ActualTy, Ty, Env#env.tenv) of
       {true, Cs} ->
         {#{}, Cs};
