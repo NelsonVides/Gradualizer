@@ -1364,7 +1364,8 @@ subst_ty(_, Ty) -> Ty.
 %% the expression together with their type and constraints.
 %-spec type_check_expr(#env, any()) -> { any(), #{ any() => any()}, #{ any() => any()} }.
 type_check_expr(Env, Expr) ->
-    % io:format("type_check_expr Expr ~p~n", [Expr]),
+    io:format("type_check_expr Expr ~p~n"
+              "  with Env ~p~n", [Expr, Env]),
     Res = {Ty, _VarBinds, _Cs} = do_type_check_expr(Env, Expr),
     ?verbose(Env, "~sPropagated type of ~ts :: ~ts~n",
              [format_location(Expr, brief), erl_prettypr:format(Expr), typelib:pp_type(Ty)]),
