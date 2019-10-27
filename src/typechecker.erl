@@ -579,6 +579,11 @@ glb_ty(_Ty1, _Ty2, _A, _TEnv) -> {type(none), constraints:empty()}.
 
 -spec normalize(type(), TEnv :: #tenv{}) -> type().
 normalize({type, _, union, Tys}, TEnv) ->
+    % dbg:tracer(),
+    % dbg:p(all, c), %% Setup call (c) tracing on all processes
+    % dbg:tpl({typechecker, normalize, '_'}, x),
+    % dbg:tpl({typechecker, flatten_unions, '_'}, x),
+    % dbg:tpl({typechecker, merge_union_types, '_'}, x),
     Types = flatten_unions(Tys, TEnv),
     case merge_union_types(Types, TEnv) of
         []  -> type(none);
@@ -723,22 +728,55 @@ flatten_type(Ty, _TEnv) ->
 %% Merges overlapping integer types (including ranges and singletons).
 %% (TODO) Removes all types that are subtypes of other types in the same union.
 %% Retuns a list of disjoint types.
-merge_union_types(Types, _TEnv) ->
+merge_union_types(Types, TEnv) ->
     case lists:any(fun ({type, _, term, []}) -> true; (_) -> false end,
                    Types) of
         true ->
             %% term() is among the types.
             [type(term)];
         false ->
-            {IntegerTypes1, OtherTypes1} =
-                lists:partition(fun is_int_type/1, Types),
+            %% Merge Integer Types
+            {IntegerTypes1, OtherTypes1} = lists:partition(fun is_int_type/1, Types),
             IntegerTypes2 = merge_int_types(IntegerTypes1),
+            %% On the rest, merge atom types
             OtherTypes2 = merge_atom_types(OtherTypes1),
+            %% Remove duplicates: TODO!
             OtherTypes3 = lists:usort(OtherTypes2),
-            IntegerTypes2 ++ OtherTypes3
+            % io:format("Before Sort ~p~n"
+            %           "After Sort ~p~n", [OtherTypes2, OtherTypes3]),
+            %% Merge subtype relations
+            {OtherTypes4, _} = % OtherTypes3,
+            lists:foldl(
+              fun(Ty, {Acc, []}) -> [Ty | Acc];
+                 (Ty, {Acc, Check}) ->
+                      case subtype_or_same_type(Ty, Check -- [Ty], TEnv) of
+                          true -> {Acc, Check};
+                          false -> {[Ty | Acc], Check};
+                          same_type -> {Acc, Check -- [Ty]}
+                      end
+              end, {[], OtherTypes3}, OtherTypes3),
+            % io:format("After merge ~p~n", [OtherTypes4]),
+            %% Return all of them
+            IntegerTypes2 ++ OtherTypes4
     end.
 
-%% Remove all atom listerals if atom() is among the types.
+subtype_or_same_type(Ty, ListOfTypes, TEnv) ->
+    lists:foldl(
+     fun
+         (_Ty2, true) -> true;
+         (_Ty2, same_type) -> same_type;
+         (Ty2, _Acc) ->
+             case subtype(Ty, Ty2, TEnv) of
+                 false -> false;
+                 _ ->
+                     case subtype(Ty2, Ty, TEnv) of
+                         false -> true;
+                         _ -> same_type
+                     end
+             end
+     end, false, ListOfTypes).
+
+%% Remove all atom literals if atom() is among the types.
 merge_atom_types(Types) ->
     IsAnyAtom = lists:any(fun ({type, _, atom, []}) -> true;
                               (_)                   -> false
@@ -3223,6 +3261,13 @@ check_clause(_Env, [?type(none)|_], _ResTy, {clause, P, _Args, _Guards, _Block})
     throw({type_error, unreachable_clause, P});
 check_clause(Env, ArgsTy, ResTy, C = {clause, P, Args, Guards, Block}) ->
     ?verbose(Env, "~sChecking clause :: ~s~n", [gradualizer_fmt:format_location(C, brief), typelib:pp_type(ResTy)]),
+    % io:format("ArgsTy ~p~n"
+    %           "ResTy ~p~n"
+    %           "Clause ~p~n", [ArgsTy, ResTy, C]),
+    % dbg:tracer(),
+    % dbg:p(all, c), %% Setup call (c) tracing on all processes
+    % dbg:tpl({typechecker, expect_binary_type, '_'}, x),
+    % dbg:tpl({typechecker, expect_binary_union, '_'}, x),
     case {length(ArgsTy), length(Args)} of
         {L, L} ->
             {PatTys, _UBounds, VEnv2, Cs1} =
